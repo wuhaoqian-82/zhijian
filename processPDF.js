@@ -36,6 +36,23 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// 统计上传到获得总结的用时
+let totalSummaryTime = 0;
+let summaryCount = 0;
+
+// 请求计时中间件（可选，统计所有请求总耗时）
+// let totalTime = 0, requestCount = 0;
+// app.use((req, res, next) => {
+//   const start = Date.now();
+//   res.on('finish', () => {
+//     const duration = Date.now() - start;
+//     totalTime += duration;
+//     requestCount += 1;
+//     logger.info(`[STATS] Request ${req.method} ${req.originalUrl} took ${duration}ms`);
+//   });
+//   next();
+// });
+
 function logError(traceId, step, err, extra = {}) {
   logger.error(`[${traceId}] [${step}] ${err.message || err}`, { stack: err.stack, ...extra });
 }
@@ -197,6 +214,7 @@ app.post('/api/xfyun/summarize', upload.single('file'), async (req, res) => {
     logError(traceId, 'entry', new Error('文件未上传'));
     return res.status(400).json({ error: '文件未上传', traceId });
   }
+  const startTime = Date.now();
   try {
     // 1. 上传文件
     const fileId = await uploadFileToXfyun(file.path, file.originalname, traceId);
@@ -210,14 +228,29 @@ app.post('/api/xfyun/summarize', upload.single('file'), async (req, res) => {
     // 4. 轮询获取总结结果
     const summary = await pollSummaryResult(fileId, traceId);
 
-    logInfo(traceId, 'done', `Summary completed`, { fileId });
-    res.json({ summary, fileId, traceId });
+    const costTime = Date.now() - startTime;
+    // 更新统计
+    totalSummaryTime += costTime;
+    summaryCount += 1;
+    logInfo(traceId, 'done', `Summary completed, costTime=${costTime} ms`, { fileId, costTime });
+
+    res.json({ summary, fileId, traceId, costTime });
   } catch (err) {
     logError(traceId, 'api', err);
     res.status(500).json({ error: err.message || err, traceId });
   } finally {
     fs.unlink(file.path, () => {});
   }
+});
+
+// 查询平均用时接口
+app.get('/api/xfyun/avgtime', (req, res) => {
+  const avg = summaryCount ? (totalSummaryTime / summaryCount).toFixed(2) : 0;
+  res.json({
+    summaryCount,
+    totalSummaryTime,
+    avgTime: Number(avg) // ms
+  });
 });
 
 app.listen(3000, () => {
