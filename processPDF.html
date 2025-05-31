@@ -3,139 +3,186 @@
 <head>
   <meta charset="UTF-8">
   <title>PDF文档摘要生成</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
-    body { font-family: sans-serif; background: #f8f8f8; }
-    .container {
-      max-width: 480px; margin: 40px auto; padding: 24px;
-      background: #fff; border-radius: 8px; box-shadow: 0 2px 10px #eee;
+    body {
+      background: #f5f7fa;
+      font-family: 'Segoe UI', '微软雅黑', Arial, sans-serif;
+      margin: 0;
+      padding: 0;
     }
-    h2 { margin-top: 0; }
-    .summary { background: #f7f7f7; padding: 16px; border-radius: 4px; margin-top: 20px; }
-    .error { color: #b71c1c; margin-top: 16px; }
-    .trace { font-size: 12px; color: #999; }
-    button { margin-top: 12px; padding: 6px 16px; }
-    input[type="file"] { margin-top: 8px; }
-
-    /* 处理动画样式 */
-    .processing {
+    .container {
+      max-width: 480px;
+      margin: 48px auto;
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 4px 32px rgba(80,120,180,0.10);
+      padding: 40px 30px 30px 30px;
+      text-align: center;
+    }
+    h2 {
+      margin-bottom: 20px;
+      color: #2d3a4b;
+    }
+    .file-label {
+      display: inline-block;
+      padding: 10px 22px;
+      background: #e8f0fe;
+      border-radius: 6px;
+      cursor: pointer;
+      color: #1a73e8;
+      font-weight: 500;
+      transition: background 0.2s;
+      margin-bottom: 10px;
+      border: 1px dashed #bfc8df;
+    }
+    .file-label:hover {
+      background: #d2e3fc;
+    }
+    #fileInput {
+      display: none;
+    }
+    .file-name {
+      margin: 10px 0 20px 0;
+      color: #444;
+      font-size: 14px;
+    }
+    .submit-btn {
+      background: #1a73e8;
+      color: #fff;
+      border: none;
+      padding: 12px 34px;
+      border-radius: 6px;
+      font-size: 16px;
+      cursor: pointer;
+      box-shadow: 0 2px 8px rgba(26,115,232,0.08);
+      font-weight: 500;
+      transition: background 0.2s;
+      margin-bottom: 12px;
+    }
+    .submit-btn:disabled {
+      background: #aecbfa;
+      cursor: not-allowed;
+    }
+    .loading {
       display: flex;
       align-items: center;
-      gap: 10px;
-      margin-top: 18px;
-      margin-bottom: 6px;
+      justify-content: center;
+      gap: 12px;
+      margin: 32px 0 18px 0;
+      color: #1a73e8;
+      font-size: 18px;
+      font-weight: 500;
+      letter-spacing: 2px;
     }
     .spinner {
       width: 22px;
       height: 22px;
-      border: 3px solid #ededed;
-      border-top: 3px solid #2196f3;
+      border: 3px solid #e3edfa;
+      border-top: 3px solid #1a73e8;
       border-radius: 50%;
-      animation: spin 0.9s linear infinite;
+      animation: spin 1s linear infinite;
     }
     @keyframes spin {
-      to { transform: rotate(360deg);}
+      to {transform: rotate(360deg);}
+    }
+    .result-card {
+      background: #f7fafc;
+      border-radius: 10px;
+      box-shadow: 0 2px 8px rgba(80,120,180,0.07);
+      padding: 24px 18px 10px 18px;
+      margin-top: 12px;
+      text-align: left;
+      font-size: 16px;
+      color: #333;
+      word-break: break-all;
+      white-space: pre-wrap;
+    }
+    .result-title {
+      font-size: 15px;
+      font-weight: bold;
+      margin-bottom: 10px;
+      color: #1a73e8;
+    }
+    .err-msg {
+      color: #d93025;
+      margin-top: 18px;
+      font-size: 15px;
+      background: #fff0f0;
+      border-radius: 6px;
+      padding: 10px 5px;
     }
   </style>
 </head>
 <body>
   <div class="container">
     <h2>PDF文档摘要生成</h2>
-    <form id="pdfForm">
-      <input type="file" id="fileInput" accept="application/pdf" />
-      <br />
-      <button type="submit" id="submitBtn">上传并生成摘要</button>
+    <form id="pdfForm" autocomplete="off">
+      <label class="file-label">
+        选择文件
+        <input type="file" id="fileInput" accept="application/pdf"/>
+      </label>
+      <div class="file-name" id="fileName">未选择文件</div>
+      <button type="submit" class="submit-btn" id="submitBtn" disabled>上传并生成摘要</button>
     </form>
-
-    <!-- 正在处理动画 -->
-    <div id="processingBox" class="processing" style="display:none">
-      <span class="spinner"></span>
-      <span id="processingText">正在生成摘要，请耐心等待...</span>
-    </div>
-
-    <div class="error" id="errorMsg" style="display:none"></div>
-    <div class="summary" id="summaryBox" style="display:none">
-      <strong>文档摘要：</strong>
-      <div id="summaryText" style="white-space:pre-wrap;margin-top:8px"></div>
-      <div class="trace" id="traceIdBox"></div>
-    </div>
+    <div id="dynamicArea"></div>
   </div>
   <script>
-    document.addEventListener('DOMContentLoaded', function() {
-      const pdfForm = document.getElementById('pdfForm');
-      const fileInput = document.getElementById('fileInput');
-      const errorMsg = document.getElementById('errorMsg');
-      const summaryBox = document.getElementById('summaryBox');
-      const summaryText = document.getElementById('summaryText');
-      const traceIdBox = document.getElementById('traceIdBox');
-      const submitBtn = document.getElementById('submitBtn');
-      const processingBox = document.getElementById('processingBox');
+    const fileInput = document.getElementById('fileInput');
+    const fileNameDisplay = document.getElementById('fileName');
+    const submitBtn = document.getElementById('submitBtn');
+    const pdfForm = document.getElementById('pdfForm');
+    const dynamicArea = document.getElementById('dynamicArea');
 
-      pdfForm.addEventListener('submit', async function(e) {
-        e.preventDefault();
-        errorMsg.style.display = 'none';
-        summaryBox.style.display = 'none';
-        errorMsg.textContent = '';
-        summaryText.textContent = '';
-        traceIdBox.textContent = '';
-
-        const file = fileInput.files[0];
-        if (!file) {
-          errorMsg.textContent = '请先选择PDF文件';
-          errorMsg.style.display = '';
-          return;
-        }
-        if (file.type !== 'application/pdf') {
-          errorMsg.textContent = '请选择PDF文件';
-          errorMsg.style.display = '';
-          return;
-        }
-
-        submitBtn.disabled = true;
-        submitBtn.textContent = "正在上传并生成摘要...";
-        processingBox.style.display = '';
-
-        try {
-          const formData = new FormData();
-          formData.append('file', file);
-
-          // 注意端口要与后端一致
-          const resp = await fetch('http://localhost:3000/api/xfyun/summarize', {
-            method: 'POST',
-            body: formData
-          });
-
-          let rawText = '';
-          let data = null;
-          try {
-            rawText = await resp.text();
-            data = JSON.parse(rawText);
-          } catch (e) {
-            errorMsg.textContent = '后端返回内容异常，无法解析为JSON，状态码：' + resp.status;
-            errorMsg.style.display = '';
-            submitBtn.disabled = false;
-            submitBtn.textContent = "上传并生成摘要";
-            processingBox.style.display = 'none';
-            return;
-          }
-
-          if (resp.ok) {
-            summaryText.textContent = data.summary || "未获取到摘要内容";
-            summaryBox.style.display = '';
-            traceIdBox.textContent = data.traceId ? `(追踪ID: ${data.traceId})` : '';
-          } else {
-            errorMsg.textContent = data.error || "服务端异常";
-            errorMsg.style.display = '';
-            traceIdBox.textContent = data.traceId ? `(追踪ID: ${data.traceId})` : '';
-          }
-        } catch (err) {
-          errorMsg.textContent = "网络或服务异常：" + err.message;
-          errorMsg.style.display = '';
-        }
+    fileInput.addEventListener('change', function() {
+      if (fileInput.files.length > 0) {
+        fileNameDisplay.textContent = fileInput.files[0].name;
         submitBtn.disabled = false;
-        submitBtn.textContent = "上传并生成摘要";
-        processingBox.style.display = 'none';
-      });
+      } else {
+        fileNameDisplay.textContent = '未选择文件';
+        submitBtn.disabled = true;
+      }
+      dynamicArea.innerHTML = '';
+    });
+
+    pdfForm.addEventListener('submit', async function(e) {
+      e.preventDefault();
+      dynamicArea.innerHTML = `
+        <div class="loading">
+          <span class="spinner"></span>
+          正在处理，请稍候...
+        </div>
+      `;
+      submitBtn.disabled = true;
+
+      const file = fileInput.files[0];
+      if (!file) return;
+
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+
+        // 你需要替换为实际后端API地址
+        const resp = await fetch('http://localhost:3000/api/xfyun/summarize', {
+          method: 'POST',
+          body: formData
+        });
+
+        if (!resp.ok) {
+          throw new Error('服务请求失败，状态码：' + resp.status);
+        }
+
+        const data = await resp.json();
+        // 假设后端返回 { summary: '...', ... }
+        dynamicArea.innerHTML = `
+          <div class="result-card">
+            <div class="result-title">文档摘要：</div>
+            ${data.summary ? data.summary : '无摘要内容返回'}
+          </div>
+        `;
+      } catch(err) {
+        dynamicArea.innerHTML = `<div class="err-msg">摘要生成失败：${err.message}</div>`;
+      }
+      submitBtn.disabled = false;
     });
   </script>
 </body>
