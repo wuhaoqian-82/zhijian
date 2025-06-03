@@ -6,88 +6,332 @@
   <title>摄像头录制视频分析</title>
   <style>
     body {
-      font-family: Arial, sans-serif;
-      max-width: 800px;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      max-width: 900px;
       margin: 0 auto;
       padding: 20px;
+      background-color: #f5f5f5;
+    }
+    .container {
+      background: white;
+      border-radius: 10px;
+      padding: 30px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    h2 {
+      text-align: center;
+      color: #333;
+      margin-bottom: 30px;
     }
     .video-container {
       text-align: center;
       margin: 20px 0;
+      position: relative;
     }
     video {
       max-width: 100%;
       border: 2px solid #ddd;
       border-radius: 8px;
+      background: #000;
+    }
+    .video-info {
+      margin-top: 10px;
+      font-size: 14px;
+      color: #666;
+      padding: 10px;
+      background: #f8f9fa;
+      border-radius: 5px;
     }
     .controls {
       margin: 20px 0;
       text-align: center;
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      flex-wrap: wrap;
     }
     button {
       margin: 5px;
-      padding: 10px 20px;
+      padding: 12px 24px;
       font-size: 16px;
       border: none;
-      border-radius: 5px;
+      border-radius: 6px;
       cursor: pointer;
+      transition: all 0.3s ease;
+      min-width: 120px;
     }
-    .start-btn { background-color: #4CAF50; color: white; }
-    .stop-btn { background-color: #f44336; color: white; }
-    .analyze-btn { background-color: #2196F3; color: white; }
-    .download-btn { background-color: #FF9800; color: white; }
+    .start-btn { 
+      background-color: #4CAF50; 
+      color: white; 
+    }
+    .start-btn:hover { 
+      background-color: #45a049; 
+    }
+    .stop-btn { 
+      background-color: #f44336; 
+      color: white; 
+    }
+    .stop-btn:hover { 
+      background-color: #da190b; 
+    }
+    .analyze-btn { 
+      background-color: #2196F3; 
+      color: white; 
+    }
+    .analyze-btn:hover { 
+      background-color: #1976D2; 
+    }
+    .download-btn { 
+      background-color: #FF9800; 
+      color: white; 
+    }
+    .download-btn:hover { 
+      background-color: #F57C00; 
+    }
     button:disabled {
-      background-color: #cccccc;
+      background-color: #cccccc !important;
       cursor: not-allowed;
+      opacity: 0.6;
     }
     .status {
-      margin: 10px 0;
-      padding: 10px;
-      border-radius: 5px;
+      margin: 15px 0;
+      padding: 15px;
+      border-radius: 6px;
       text-align: center;
+      font-weight: 500;
     }
-    .status.recording { background-color: #ffebee; color: #c62828; }
-    .status.ready { background-color: #e8f5e8; color: #2e7d32; }
-    .status.processing { background-color: #fff3e0; color: #ef6c00; }
+    .status.recording { 
+      background-color: #ffebee; 
+      color: #c62828; 
+      border-left: 4px solid #f44336;
+    }
+    .status.ready { 
+      background-color: #e8f5e8; 
+      color: #2e7d32; 
+      border-left: 4px solid #4CAF50;
+    }
+    .status.processing { 
+      background-color: #fff3e0; 
+      color: #ef6c00; 
+      border-left: 4px solid #FF9800;
+    }
+    .status.error { 
+      background-color: #ffebee; 
+      color: #c62828; 
+      border-left: 4px solid #f44336;
+    }
     #result {
       margin: 20px 0;
-      padding: 15px;
+      padding: 20px;
       border: 1px solid #ddd;
-      border-radius: 5px;
+      border-radius: 8px;
       background-color: #f9f9f9;
     }
     .emotion-item {
-      margin: 5px 0;
-      padding: 8px;
+      margin: 8px 0;
+      padding: 12px;
       background-color: white;
-      border-radius: 3px;
+      border-radius: 6px;
       border-left: 4px solid #2196F3;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
     }
     .recording-time {
-      font-size: 18px;
+      font-size: 20px;
       font-weight: bold;
       color: #f44336;
+      background: #ffebee;
+      padding: 10px 20px;
+      border-radius: 20px;
+      display: inline-block;
+    }
+    .progress-bar {
+      width: 100%;
+      height: 8px;
+      background-color: #e0e0e0;
+      border-radius: 4px;
+      overflow: hidden;
+      margin: 10px 0;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #2196F3, #21CBF3);
+      transition: width 0.3s ease;
+    }
+    .loading-spinner {
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      border: 3px solid #f3f3f3;
+      border-top: 3px solid #2196F3;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin-right: 10px;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    .compatibility-warning {
+      background-color: #fff3cd;
+      color: #856404;
+      padding: 15px;
+      border-radius: 6px;
+      margin: 15px 0;
+      border-left: 4px solid #ffc107;
+    }
+    .result-section {
+      margin: 20px 0;
+      padding: 15px;
+      border-radius: 6px;
+      background: white;
+      border: 1px solid #e0e0e0;
+    }
+    .result-section h4 {
+      margin-top: 0;
+      color: #333;
+      border-bottom: 2px solid #e0e0e0;
+      padding-bottom: 10px;
+    }
+    .asr-text {
+      background: #f8f9fa;
+      padding: 15px;
+      border-radius: 6px;
+      border: 1px solid #dee2e6;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      font-family: 'Courier New', monospace;
+      line-height: 1.5;
+      min-height: 60px;
+    }
+    .emotion-timeline {
+      max-height: 400px;
+      overflow-y: auto;
+      border: 1px solid #dee2e6;
+      border-radius: 6px;
+    }
+    .processing-info {
+      background: #e3f2fd;
+      padding: 12px;
+      border-radius: 6px;
+      margin: 10px 0;
+      font-size: 14px;
+      color: #1565c0;
+    }
+    .emotion-details {
+      font-size: 11px;
+      color: #666;
+      margin-top: 5px;
+      max-height: 80px;
+      overflow-y: auto;
+      background: #f8f9fa;
+      padding: 8px;
+      border-radius: 4px;
+    }
+    .server-status {
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      padding: 8px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      z-index: 1000;
+      font-weight: bold;
+    }
+    .server-status.online {
+      background: #4CAF50;
+      color: white;
+    }
+    .server-status.offline {
+      background: #f44336;
+      color: white;
+    }
+    .server-status.checking {
+      background: #FF9800;
+      color: white;
+    }
+    .recording-tips {
+      background: #e3f2fd;
+      padding: 10px;
+      border-radius: 5px;
+      margin: 10px 0;
+      font-size: 13px;
+      color: #1976d2;
+    }
+    .error-details {
+      background: #ffebee;
+      border: 1px solid #f44336;
+      border-radius: 6px;
+      padding: 15px;
+      margin: 15px 0;
+    }
+    .error-details h4 {
+      color: #d32f2f;
+      margin-top: 0;
+    }
+    .error-details pre {
+      background: #fff;
+      padding: 10px;
+      border-radius: 4px;
+      overflow-x: auto;
+      margin: 10px 0;
+    }
+    .suggestions {
+      background: #f3e5f5;
+      padding: 10px;
+      border-radius: 4px;
+      margin-top: 10px;
+    }
+    .suggestions ul {
+      margin: 5px 0;
+      padding-left: 20px;
+    }
+    @media (max-width: 768px) {
+      .container {
+        padding: 15px;
+      }
+      .controls {
+        flex-direction: column;
+        align-items: center;
+      }
+      button {
+        width: 200px;
+      }
     }
   </style>
 </head>
 <body>
-  <h2>摄像头录制视频表情与语音分析</h2>
-  
-  <div class="video-container">
-    <video id="preview" width="640" height="480" autoplay muted playsinline></video>
+  <div class="container">
+    <h2>🎥 摄像头录制视频表情与语音分析</h2>
+    
+    <div class="video-container">
+      <video id="preview" width="640" height="480" autoplay muted playsinline></video>
+      <div class="video-info" id="videoInfo">等待摄像头初始化...</div>
+    </div>
+    
+    <div class="recording-tips" id="recordingTips" style="display: none;">
+      💡 录制提示: 请确保光线充足，说话清晰，避免背景噪音。建议录制10-30秒的视频以获得最佳分析效果。
+    </div>
+    
+    <div class="controls">
+      <button id="startBtn" class="start-btn">🎬 开始录制</button>
+      <button id="stopBtn" class="stop-btn" disabled>⏹️ 停止录制</button>
+      <button id="analyzeBtn" class="analyze-btn" disabled>🔍 分析视频</button>
+      <button id="downloadBtn" class="download-btn" disabled>⬇️ 下载录制视频</button>
+    </div>
+    
+    <div id="status" class="status">正在初始化摄像头...</div>
+    <div id="recordingTime" class="recording-time" style="display: none;"></div>
+    <div id="progressContainer" style="display: none;">
+      <div class="progress-bar">
+        <div class="progress-bar-fill" id="progressBar"></div>
+      </div>
+      <div id="progressText" class="processing-info"></div>
+    </div>
+    
+    <div id="result"></div>
   </div>
-  
-  <div class="controls">
-    <button id="startBtn" class="start-btn">开始录制</button>
-    <button id="stopBtn" class="stop-btn" disabled>停止录制</button>
-    <button id="analyzeBtn" class="analyze-btn" disabled>分析视频</button>
-    <button id="downloadBtn" class="download-btn" disabled>下载录制视频</button>
-  </div>
-  
-  <div id="status" class="status">点击"开始录制"开始录制视频</div>
-  <div id="recordingTime" class="recording-time" style="display: none;"></div>
-  
-  <div id="result"></div>
+
+  <div id="serverStatus" class="server-status checking">服务器: 检测中...</div>
 
   <script>
     class VideoRecorder {
@@ -97,7 +341,12 @@
         this.stream = null;
         this.recordingStartTime = null;
         this.recordingTimer = null;
+        this.supportedMimeTypes = [];
+        this.selectedMimeType = null;
+        this.serverOnline = false;
+        this.recordingQuality = 'high';
         
+        // DOM 元素
         this.preview = document.getElementById('preview');
         this.startBtn = document.getElementById('startBtn');
         this.stopBtn = document.getElementById('stopBtn');
@@ -106,33 +355,189 @@
         this.status = document.getElementById('status');
         this.recordingTime = document.getElementById('recordingTime');
         this.result = document.getElementById('result');
+        this.videoInfo = document.getElementById('videoInfo');
+        this.progressContainer = document.getElementById('progressContainer');
+        this.progressBar = document.getElementById('progressBar');
+        this.progressText = document.getElementById('progressText');
+        this.serverStatus = document.getElementById('serverStatus');
+        this.recordingTips = document.getElementById('recordingTips');
+        
+        // 配置
+        this.serverUrl = this.detectServerUrl();
         
         this.init();
       }
       
+      detectServerUrl() {
+        // 尝试检测服务器URL
+        const possibleUrls = [
+          'http://localhost:3100',
+          'http://127.0.0.1:3100',
+          'http://localhost:3000',
+          'http://127.0.0.1:3000'
+        ];
+        return possibleUrls[0];
+      }
+      
+      async checkBrowserCompatibility() {
+        const issues = [];
+        
+        if (!navigator.mediaDevices) {
+          issues.push('不支持媒体设备API');
+        }
+        
+        if (!navigator.mediaDevices.getUserMedia) {
+          issues.push('不支持getUserMedia API');
+        }
+        
+        if (!window.MediaRecorder) {
+          issues.push('不支持MediaRecorder API');
+        }
+        
+        if (!window.fetch) {
+          issues.push('不支持Fetch API');
+        }
+        
+        // 检查支持的视频格式
+        if (window.MediaRecorder) {
+          const testTypes = [
+            { type: 'video/webm;codecs=vp9,opus', quality: 'high' },
+            { type: 'video/webm;codecs=vp8,opus', quality: 'medium' }, 
+            { type: 'video/webm', quality: 'medium' },
+            { type: 'video/mp4', quality: 'low' }
+          ];
+          
+          for (const { type, quality } of testTypes) {
+            if (MediaRecorder.isTypeSupported(type)) {
+              this.supportedMimeTypes.push({ type, quality });
+            }
+          }
+          
+          if (this.supportedMimeTypes.length === 0) {
+            issues.push('不支持任何视频录制格式');
+          } else {
+            this.selectedMimeType = this.supportedMimeTypes[0].type;
+            this.recordingQuality = this.supportedMimeTypes[0].quality;
+          }
+        }
+        
+        return issues;
+      }
+      
+      showCompatibilityWarning(issues) {
+        const warningDiv = document.createElement('div');
+        warningDiv.className = 'compatibility-warning';
+        warningDiv.innerHTML = `
+          <h4>⚠️ 浏览器兼容性警告</h4>
+          <p>检测到以下问题：</p>
+          <ul>
+            ${issues.map(issue => `<li>${this.escapeHtml(issue)}</li>`).join('')}
+          </ul>
+          <p>建议使用最新版本的Chrome、Firefox或Edge浏览器。</p>
+        `;
+        
+        document.querySelector('.container').insertBefore(warningDiv, document.querySelector('.video-container'));
+      }
+      
       async init() {
         try {
+          // 检查浏览器兼容性
+          const compatibilityIssues = await this.checkBrowserCompatibility();
+          if (compatibilityIssues.length > 0) {
+            this.showCompatibilityWarning(compatibilityIssues);
+            this.updateStatus('浏览器兼容性存在问题，功能可能受限', 'error');
+            return;
+          }
+          
           // 请求摄像头和麦克风权限
-          this.stream = await navigator.mediaDevices.getUserMedia({
+          this.updateStatus('正在请求摄像头和麦克风权限...', 'processing');
+          
+          const constraints = {
             video: {
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
-              frameRate: { ideal: 30 }
+              width: { ideal: 1280, max: 1920 },
+              height: { ideal: 720, max: 1080 },
+              frameRate: { ideal: 30, max: 60 }
             },
             audio: {
               echoCancellation: true,
               noiseSuppression: true,
-              autoGainControl: true
+              autoGainControl: true,
+              sampleRate: { ideal: 44100, min: 16000 }
             }
-          });
+          };
           
+          this.stream = await navigator.mediaDevices.getUserMedia(constraints);
           this.preview.srcObject = this.stream;
+          
+          // 获取实际的视频流信息
+          const videoTrack = this.stream.getVideoTracks()[0];
+          const audioTrack = this.stream.getAudioTracks()[0];
+          
+          if (videoTrack) {
+            const settings = videoTrack.getSettings();
+            this.videoInfo.innerHTML = `
+              📹 视频: ${settings.width || '未知'}×${settings.height || '未知'} @ ${settings.frameRate || '未知'}fps
+              ${audioTrack ? `<br>🎤 音频: ${audioTrack.getSettings().sampleRate || '未知'}Hz` : ''}
+              <br>📊 录制格式: ${this.selectedMimeType || '未知'} (${this.recordingQuality}质量)
+            `;
+          }
+          
           this.setupEventListeners();
-          this.updateStatus('摄像头已准备就绪', 'ready');
+          this.updateStatus('摄像头已准备就绪，点击开始录制', 'ready');
+          this.recordingTips.style.display = 'block';
+          
+          // 测试服务器连接
+          this.testServerConnection();
           
         } catch (error) {
           console.error('摄像头初始化失败:', error);
-          this.updateStatus('摄像头访问失败: ' + error.message, 'error');
+          let errorMessage = '摄像头访问失败: ';
+          
+          if (error.name === 'NotAllowedError') {
+            errorMessage += '用户拒绝了摄像头权限，请在浏览器设置中允许摄像头访问';
+          } else if (error.name === 'NotFoundError') {
+            errorMessage += '未找到摄像头设备，请确认摄像头已连接';
+          } else if (error.name === 'NotReadableError') {
+            errorMessage += '摄像头被其他应用占用，请关闭其他使用摄像头的应用';
+          } else if (error.name === 'OverconstrainedError') {
+            errorMessage += '摄像头不支持所请求的配置，尝试降低分辨率';
+          } else {
+            errorMessage += error.message;
+          }
+          
+          this.updateStatus(errorMessage, 'error');
+        }
+      }
+      
+      async testServerConnection() {
+        try {
+          this.serverStatus.textContent = '服务器: 检测中...';
+          this.serverStatus.className = 'server-status checking';
+          
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 5000);
+          
+          const response = await fetch(`${this.serverUrl}/health`, {
+            method: 'GET',
+            signal: controller.signal
+          });
+          
+          clearTimeout(timeoutId);
+          
+          if (response.ok) {
+            const data = await response.json();
+            this.serverOnline = true;
+            this.serverStatus.textContent = '🟢 服务器在线';
+            this.serverStatus.className = 'server-status online';
+            console.log('服务器连接正常:', data);
+          } else {
+            throw new Error(`HTTP ${response.status}`);
+          }
+        } catch (error) {
+          this.serverOnline = false;
+          this.serverStatus.textContent = '🔴 服务器离线';
+          this.serverStatus.className = 'server-status offline';
+          console.warn('服务器连接失败:', error.message);
         }
       }
       
@@ -141,32 +546,54 @@
         this.stopBtn.addEventListener('click', () => this.stopRecording());
         this.analyzeBtn.addEventListener('click', () => this.analyzeVideo());
         this.downloadBtn.addEventListener('click', () => this.downloadVideo());
+        
+        // 监听页面可见性变化
+        document.addEventListener('visibilitychange', () => {
+          if (document.hidden && this.mediaRecorder && this.mediaRecorder.state === 'recording') {
+            console.warn('页面隐藏时录制可能受影响');
+          }
+        });
+        
+        // 定期检查服务器状态
+        setInterval(() => {
+          this.testServerConnection();
+        }, 30000);
       }
       
       async startRecording() {
         try {
           this.recordedChunks = [];
           
-          // 配置录制选项
+          if (!this.selectedMimeType) {
+            throw new Error('无可用的录制格式');
+          }
+          
+          // 优化录制参数
           const options = {
-            mimeType: 'video/webm;codecs=vp9,opus',
-            videoBitsPerSecond: 1000000, // 1Mbps
-            audioBitsPerSecond: 128000   // 128kbps
+            mimeType: this.selectedMimeType
           };
           
-          // 检查浏览器支持的格式
-          if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-            options.mimeType = 'video/webm';
-            if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-              options.mimeType = 'video/mp4';
-            }
+          // 根据格式调整比特率
+          if (this.selectedMimeType.includes('vp9')) {
+            options.videoBitsPerSecond = 1500000; // VP9更高效
+            options.audioBitsPerSecond = 128000;
+          } else if (this.selectedMimeType.includes('vp8')) {
+            options.videoBitsPerSecond = 2000000;
+            options.audioBitsPerSecond = 128000;
+          } else if (this.selectedMimeType.includes('mp4')) {
+            options.videoBitsPerSecond = 2500000; // MP4需要更高比特率
+            options.audioBitsPerSecond = 128000;
+          } else {
+            options.videoBitsPerSecond = 2000000;
+            options.audioBitsPerSecond = 128000;
           }
           
           this.mediaRecorder = new MediaRecorder(this.stream, options);
           
           this.mediaRecorder.ondataavailable = (event) => {
-            if (event.data.size > 0) {
+            if (event.data && event.data.size > 0) {
               this.recordedChunks.push(event.data);
+              console.log(`录制数据块: ${event.data.size} bytes, 总块数: ${this.recordedChunks.length}`);
             }
           };
           
@@ -174,7 +601,13 @@
             this.onRecordingComplete();
           };
           
-          this.mediaRecorder.start(1000); // 每秒收集一次数据
+          this.mediaRecorder.onerror = (event) => {
+            console.error('录制错误:', event.error);
+            this.updateStatus('录制出现错误: ' + event.error.message, 'error');
+            this.resetRecordingState();
+          };
+          
+          this.mediaRecorder.start(250); // 更频繁收集数据，提高稳定性
           
           this.recordingStartTime = Date.now();
           this.startRecordingTimer();
@@ -184,25 +617,37 @@
           this.analyzeBtn.disabled = true;
           this.downloadBtn.disabled = true;
           
-          this.updateStatus('正在录制...', 'recording');
+          this.updateStatus('正在录制中... 📹', 'recording');
+          this.recordingTips.style.display = 'none';
           
         } catch (error) {
           console.error('开始录制失败:', error);
           this.updateStatus('录制失败: ' + error.message, 'error');
+          this.resetRecordingState();
         }
       }
       
       stopRecording() {
-        if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
-          this.mediaRecorder.stop();
+        try {
+          if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+            this.mediaRecorder.stop();
+          }
+          
+          this.stopRecordingTimer();
+          this.resetRecordingState();
+          this.updateStatus('录制完成，正在处理数据...', 'processing');
+          
+        } catch (error) {
+          console.error('停止录制失败:', error);
+          this.updateStatus('停止录制失败: ' + error.message, 'error');
+          this.resetRecordingState();
         }
-        
-        this.stopRecordingTimer();
-        
+      }
+      
+      resetRecordingState() {
         this.startBtn.disabled = false;
         this.stopBtn.disabled = true;
-        
-        this.updateStatus('录制完成，可以进行分析', 'ready');
+        this.recordingTips.style.display = 'block';
       }
       
       startRecordingTimer() {
@@ -213,7 +658,7 @@
           const minutes = Math.floor(seconds / 60);
           const remainingSeconds = seconds % 60;
           this.recordingTime.textContent = 
-            `录制时间: ${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
+            `⏱️ 录制时间: ${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
         }, 1000);
       }
       
@@ -226,123 +671,345 @@
       }
       
       onRecordingComplete() {
-        const blob = new Blob(this.recordedChunks, { type: 'video/webm' });
-        this.recordedBlob = blob;
-        
-        this.analyzeBtn.disabled = false;
-        this.downloadBtn.disabled = false;
-        
-        // 显示录制的视频大小
-        const sizeInMB = (blob.size / (1024 * 1024)).toFixed(2);
-        this.updateStatus(`录制完成 (${sizeInMB} MB)，可以进行分析或下载`, 'ready');
+        try {
+          console.log('开始处理录制数据, 数据块数量:', this.recordedChunks.length);
+          
+          if (this.recordedChunks.length === 0) {
+            throw new Error('没有录制到任何数据');
+          }
+          
+          // 验证每个数据块
+          const validChunks = this.recordedChunks.filter(chunk => chunk.size > 0);
+          if (validChunks.length === 0) {
+            throw new Error('所有录制的数据块都是空的');
+          }
+          
+          console.log(`有效数据块: ${validChunks.length}/${this.recordedChunks.length}`);
+          
+          const blob = new Blob(validChunks, { 
+            type: this.selectedMimeType || 'video/webm'
+          });
+          
+          if (blob.size === 0) {
+            throw new Error('生成的视频文件为空');
+          }
+          
+          this.recordedBlob = blob;
+          
+          this.analyzeBtn.disabled = false;
+          this.downloadBtn.disabled = false;
+          
+          // 显示录制的视频信息
+          const sizeInMB = (blob.size / (1024 * 1024)).toFixed(2);
+          const duration = this.recordingStartTime ? 
+            Math.round((Date.now() - this.recordingStartTime) / 1000) : 0;
+            
+          this.updateStatus(
+            `录制完成! 文件大小: ${sizeInMB} MB, 时长: ${duration}秒`, 
+            'ready'
+          );
+          
+          console.log('录制完成:', {
+            size: blob.size,
+            sizeMB: sizeInMB,
+            type: blob.type,
+            chunks: validChunks.length,
+            duration: duration
+          });
+          
+        } catch (error) {
+          console.error('录制完成处理失败:', error);
+          this.updateStatus('录制数据处理失败: ' + error.message, 'error');
+        }
       }
       
       async analyzeVideo() {
         if (!this.recordedBlob) {
-          alert('没有录制的视频');
+          this.updateStatus('没有录制的视频数据', 'error');
           return;
         }
         
-        this.updateStatus('正在分析视频...', 'processing');
+        if (!this.serverOnline) {
+          this.updateStatus('服务器离线，无法进行分析。请检查服务器状态。', 'error');
+          return;
+        }
+        
+        this.updateStatus('正在分析视频，请稍候...', 'processing');
         this.analyzeBtn.disabled = true;
-        this.result.innerHTML = '<div style="text-align: center;">🔄 正在处理视频，请稍候...</div>';
+        this.showProgress(0, '准备发送视频数据...');
         
         try {
           // 将Blob转换为Base64
+          this.showProgress(10, '正在编码视频数据...');
           const base64Data = await this.blobToBase64(this.recordedBlob);
           
-          const response = await fetch('http://localhost:3100/api/video/analyze-base64', {
+          // 验证base64数据
+          if (!base64Data || base64Data.length === 0) {
+            throw new Error('视频数据编码失败');
+          }
+          
+          this.showProgress(20, '正在发送到服务器...');
+          
+          const requestData = {
+            videoData: base64Data,
+            filename: `recorded_${Date.now()}.webm`
+          };
+          
+          console.log('发送分析请求:', {
+            originalSize: this.recordedBlob.size,
+            base64Size: base64Data.length,
+            filename: requestData.filename
+          });
+          
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 120000); // 2分钟超时
+          
+          const response = await fetch(`${this.serverUrl}/api/video/analyze-base64`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
             },
-            body: JSON.stringify({
-              videoData: base64Data,
-              filename: `recorded_${Date.now()}.webm`
-            })
+            body: JSON.stringify(requestData),
+            signal: controller.signal
           });
           
-          if (!response.ok) {
-            throw new Error(`服务器错误: ${response.status}`);
-          }
+          clearTimeout(timeoutId);
+          this.showProgress(60, '服务器正在处理...');
           
           const data = await response.json();
           
+          if (!response.ok) {
+            throw new Error(`服务器错误 (${response.status}): ${data.error || data.message || '未知错误'}`);
+          }
+          
           if (data.success) {
+            this.showProgress(100, '分析完成!');
             this.displayResults(data);
-            this.updateStatus('分析完成', 'ready');
+            this.updateStatus('视频分析完成!', 'ready');
           } else {
             throw new Error(data.error || '分析失败');
           }
           
         } catch (error) {
           console.error('分析失败:', error);
-          this.result.innerHTML = `<div style="color: red;">❌ 分析失败: ${this.escapeHtml(error.message)}</div>`;
-          this.updateStatus('分析失败', 'error');
+          this.displayError(error);
         } finally {
           this.analyzeBtn.disabled = false;
+          this.hideProgress();
         }
+      }
+      
+      displayError(error) {
+        let errorMessage = error.message;
+        let suggestions = [];
+        
+        if (error.name === 'AbortError') {
+          errorMessage = '请求超时，请尝试录制较短的视频';
+          suggestions = [
+            '录制10-30秒的短视频',
+            '检查网络连接稳定性',
+            '重启服务器后重试'
+          ];
+        } else if (error.name === 'TypeError' && error.message.includes('fetch')) {
+          errorMessage = `无法连接到服务器 (${this.serverUrl})`;
+          suggestions = [
+            '确认服务器已启动并运行在端口3100',
+            '检查防火墙设置',
+            '尝试刷新页面',
+            '检查服务器控制台是否有错误信息'
+          ];
+        } else if (error.message.includes('413') || error.message.includes('FILE_TOO_LARGE')) {
+          errorMessage = '视频文件太大，服务器无法处理';
+          suggestions = [
+            '录制较短的视频（建议10-30秒）',
+            '降低录制质量',
+            '检查服务器配置的文件大小限制'
+          ];
+        } else if (error.message.includes('400') || error.message.includes('INVALID_VIDEO')) {
+          errorMessage = '视频数据格式错误或损坏';
+          suggestions = [
+            '重新录制视频',
+            '尝试使用不同的浏览器',
+            '检查摄像头和麦克风是否正常工作'
+          ];
+        } else if (error.message.includes('500') || error.message.includes('ffmpeg')) {
+          errorMessage = '服务器处理视频时发生错误';
+          suggestions = [
+            '检查服务器控制台的详细错误信息',
+            '确认ffmpeg正确安装',
+            '重启服务器',
+            '尝试录制不同格式的视频'
+          ];
+        }
+        
+        this.result.innerHTML = `
+          <div class="error-details">
+            <h4>❌ 分析失败</h4>
+            <pre>${this.escapeHtml(errorMessage)}</pre>
+            
+            ${suggestions.length > 0 ? `
+              <div class="suggestions">
+                <strong>💡 建议解决方案：</strong>
+                <ul>
+                  ${suggestions.map(suggestion => `<li>${this.escapeHtml(suggestion)}</li>`).join('')}
+                </ul>
+              </div>
+            ` : ''}
+            
+            <div style="margin-top: 15px; font-size: 12px; color: #666;">
+              <strong>技术信息：</strong><br>
+              服务器地址: ${this.serverUrl}<br>
+              录制格式: ${this.selectedMimeType}<br>
+              视频大小: ${this.recordedBlob ? (this.recordedBlob.size / 1024 / 1024).toFixed(2) + ' MB' : '未知'}<br>
+              时间戳: ${new Date().toISOString()}
+            </div>
+          </div>
+        `;
+        
+        this.updateStatus('分析失败', 'error');
+      }
+      
+      showProgress(percent, message) {
+        this.progressContainer.style.display = 'block';
+        this.progressBar.style.width = percent + '%';
+        this.progressText.innerHTML = `<div class="loading-spinner"></div>${message} (${percent}%)`;
+      }
+      
+      hideProgress() {
+        this.progressContainer.style.display = 'none';
       }
       
       blobToBase64(blob) {
         return new Promise((resolve, reject) => {
           const reader = new FileReader();
-          reader.onload = () => resolve(reader.result);
-          reader.onerror = reject;
+          reader.onload = () => {
+            try {
+              const result = reader.result;
+              if (!result) {
+                reject(new Error('文件读取结果为空'));
+                return;
+              }
+              resolve(result);
+            } catch (error) {
+              reject(new Error('文件读取结果处理失败: ' + error.message));
+            }
+          };
+          reader.onerror = () => reject(new Error('文件读取失败: ' + (reader.error?.message || '未知错误')));
           reader.readAsDataURL(blob);
         });
       }
       
       displayResults(data) {
-        const { emotionTimeline, asrText, processedFrames } = data;
+        const { 
+          emotionTimeline, 
+          asrText, 
+          asrError,
+          processedFrames, 
+          processingTimeMs,
+          videoInfo 
+        } = data;
         
-        const emotionHtml = emotionTimeline.map(item => 
-          `<div class="emotion-item">
-            <strong>帧 ${this.escapeHtml(item.frame)}:</strong> 
-            ${this.formatEmotion(item.emotion)}
-          </div>`
-        ).join('');
+        console.log('收到分析结果:', data);
+        
+        let emotionHtml = '';
+        if (emotionTimeline && emotionTimeline.length > 0) {
+          emotionHtml = emotionTimeline.map((item, index) => 
+            `<div class="emotion-item">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <strong>🖼️ 第 ${index + 1} 帧 (${this.escapeHtml(item.frame || 'unknown')})</strong>
+                <span style="font-size: 12px; color: #666;">时间: ${item.timestamp || index}s</span>
+              </div>
+              <div class="emotion-details">
+                ${this.formatEmotion(item.emotion)}
+              </div>
+            </div>`
+          ).join('');
+        } else {
+          emotionHtml = '<div style="text-align: center; color: #666; padding: 20px;">未检测到表情数据</div>';
+        }
+        
+        // ASR结果处理
+        let asrHtml = '';
+        if (asrError) {
+          asrHtml = `<div style="color: #d32f2f; padding: 10px; background: #ffebee; border-radius: 4px;">
+            <strong>❌ 语音识别失败:</strong> ${this.escapeHtml(asrError.message)}<br>
+            <small>错误代码: ${asrError.code || '未知'}</small>
+          </div>`;
+        } else if (asrText && asrText.trim()) {
+          asrHtml = `<div class="asr-text">${this.escapeHtml(asrText)}</div>`;
+        } else {
+          asrHtml = `<div style="color: #666; font-style: italic; text-align: center; padding: 20px;">
+            未识别到语音内容（可能是静音、音质问题或视频中无音频）
+          </div>`;
+        }
+        
+        // 处理信息
+        const processingInfo = `
+          <div class="processing-info">
+            📊 处理统计: 共处理 ${processedFrames || 0} 帧，耗时 ${processingTimeMs || 0}ms
+            ${videoInfo ? `<br>📁 视频信息: ${videoInfo.sizeMB}MB, 时长: ${videoInfo.duration?.toFixed(1) || '未知'}秒` : ''}
+            ${videoInfo ? `<br>🎥 编码格式: 视频${videoInfo.videoCodec || '未知'}, 音频${videoInfo.audioCodec || '未知'}` : ''}
+          </div>
+        `;
         
         this.result.innerHTML = `
-          <h3>📊 分析结果</h3>
-          <div style="margin-bottom: 20px;">
-            <h4>🎤 语音识别结果:</h4>
-            <div style="background: white; padding: 15px; border-radius: 5px; border: 1px solid #ddd;">
-              <pre style="margin: 0; white-space: pre-wrap; word-wrap: break-word;">${this.escapeHtml(asrText || '未识别到语音内容')}</pre>
-            </div>
+          <h3>📈 分析结果</h3>
+          ${processingInfo}
+          
+          <div class="result-section">
+            <h4>🎤 语音识别结果</h4>
+            ${asrHtml}
           </div>
           
-          <div>
-            <h4>😊 表情变化分析 (共处理 ${processedFrames} 帧):</h4>
-            <div style="max-height: 400px; overflow-y: auto;">
-              ${emotionHtml || '<div>未检测到表情数据</div>'}
+          <div class="result-section">
+            <h4>😊 表情分析时间线</h4>
+            <div class="emotion-timeline">
+              ${emotionHtml}
             </div>
           </div>
         `;
       }
       
       formatEmotion(emotion) {
-        if (emotion.error) {
-          return `<span style="color: red;">${this.escapeHtml(emotion.error)}</span>`;
+        if (!emotion) {
+          return '<span style="color: #666;">无数据</span>';
         }
-        return `<code>${this.escapeHtml(JSON.stringify(emotion, null, 2))}</code>`;
+        
+        if (emotion.error) {
+          return `<span style="color: red;">❌ ${this.escapeHtml(emotion.error)}</span>`;
+        }
+        
+        try {
+          // 格式化表情分析结果
+          const formatted = JSON.stringify(emotion, null, 2);
+          return `<pre style="margin: 0; font-size: 10px; white-space: pre-wrap;">${this.escapeHtml(formatted)}</pre>`;
+        } catch (e) {
+          return `<span style="color: #666;">数据格式错误</span>`;
+        }
       }
       
       downloadVideo() {
         if (!this.recordedBlob) {
-          alert('没有录制的视频');
+          this.updateStatus('没有录制的视频数据', 'error');
           return;
         }
         
-        const url = URL.createObjectURL(this.recordedBlob);
-        const a = document.createElement('a');
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        a.href = url;
-        a.download = `recorded_video_${timestamp}.webm`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        try {
+          const url = URL.createObjectURL(this.recordedBlob);
+          const a = document.createElement('a');
+          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+          a.href = url;
+          a.download = `recorded_video_${timestamp}.webm`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+          
+          this.updateStatus('视频下载完成', 'ready');
+        } catch (error) {
+          console.error('下载失败:', error);
+          this.updateStatus('下载失败: ' + error.message, 'error');
+        }
       }
       
       updateStatus(message, type = '') {
@@ -351,6 +1018,9 @@
       }
       
       escapeHtml(text) {
+        if (typeof text !== 'string') {
+          text = String(text);
+        }
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
@@ -370,8 +1040,14 @@
     
     // 页面加载完成后初始化
     let recorder;
-    window.addEventListener('load', () => {
-      recorder = new VideoRecorder();
+    window.addEventListener('DOMContentLoaded', () => {
+      try {
+        recorder = new VideoRecorder();
+      } catch (error) {
+        console.error('初始化失败:', error);
+        document.getElementById('status').textContent = '初始化失败: ' + error.message;
+        document.getElementById('status').className = 'status error';
+      }
     });
     
     // 页面卸载时清理资源
@@ -379,6 +1055,15 @@
       if (recorder) {
         recorder.destroy();
       }
+    });
+    
+    // 全局错误处理
+    window.addEventListener('error', (event) => {
+      console.error('页面错误:', event.error);
+    });
+    
+    window.addEventListener('unhandledrejection', (event) => {
+      console.error('未处理的Promise错误:', event.reason);
     });
   </script>
 </body>
