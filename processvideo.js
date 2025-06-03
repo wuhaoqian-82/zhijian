@@ -8,6 +8,9 @@ const ffmpegPath = require('ffmpeg-static');
 const axios = require("axios");
 const crypto = require("crypto");
 const WebSocket = require("ws");
+const rateLimit = require('express-rate-limit');
+const cluster = require('cluster');
+const numCPUs = require('os').cpus().length;
 
 // 检查并导入mp3-parser，如果不存在则提供fallback
 let mp3Parser;
@@ -19,6 +22,410 @@ try {
     readFrameHeader: () => ({ bitrate: 128000 }) // 默认128kbps
   };
 }
+
+// ========== 日志系统 ==========
+class Logger {
+  constructor() {
+    this.logDir = path.join(__dirname, 'logs');
+    this.ensureLogDirectory();
+  }
+  
+  ensureLogDirectory() {
+    if (!fs.existsSync(this.logDir)) {
+      fs.mkdirSync(this.logDir, { recursive: true });
+    }
+  }
+  
+  log(level, message, data = null) {
+    const timestamp = new Date().toISOString();
+    const logEntry = {
+      timestamp,
+      level,
+      message,
+      data,
+      pid: process.pid,
+      memory: process.memoryUsage(),
+      worker: cluster.isWorker ? cluster.worker.id : 'master'
+    };
+    
+    console.log(`[${timestamp}] [${level.toUpperCase()}] [PID:${process.pid}] ${message}`, data || '');
+    
+    // 写入日志文件
+    this.writeToFile(level, logEntry);
+  }
+  
+  writeToFile(level, logEntry) {
+    try {
+      const logFile = path.join(this.logDir, `${level.toLowerCase()}.log`);
+      const logLine = JSON.stringify(logEntry) + '\n';
+      
+      fs.appendFileSync(logFile, logLine);
+      
+      // 如果是错误，也写入通用日志
+      if (level === 'ERROR') {
+        const generalLogFile = path.join(this.logDir, 'general.log');
+        fs.appendFileSync(generalLogFile, logLine);
+      }
+    } catch (error) {
+      console.error('写入日志文件失败:', error.message);
+    }
+  }
+  
+  info(message, data) { this.log('INFO', message, data); }
+  warn(message, data) { this.log('WARN', message, data); }
+  error(message, data) { this.log('ERROR', message, data); }
+  debug(message, data) { this.log('DEBUG', message, data); }
+}
+
+// ========== 性能监控 ==========
+class PerformanceMonitor {
+  constructor() {
+    this.metrics = {
+      requests: 0,
+      errors: 0,
+      totalProcessingTime: 0,
+      averageProcessingTime: 0,
+      peakMemory: 0,
+      startTime: Date.now(),
+      requestsPerMinute: 0,
+      lastMinuteRequests: []
+    };
+    
+    this.startMemoryMonitoring();
+    this.startRequestRateMonitoring();
+  }
+  
+  startMemoryMonitoring() {
+    setInterval(() => {
+      const usage = process.memoryUsage();
+      this.metrics.peakMemory = Math.max(this.metrics.peakMemory, usage.heapUsed);
+      
+      // 内存泄漏警告
+      if (usage.heapUsed > 1024 * 1024 * 1024) { // 1GB
+        logger.warn('内存使用过高', { memoryUsage: usage });
+      }
+    }, 5000);
+  }
+  
+  startRequestRateMonitoring() {
+    setInterval(() => {
+      const now = Date.now();
+      const oneMinuteAgo = now - 60000;
+      
+      // 清理过期请求记录
+      this.metrics.lastMinuteRequests = this.metrics.lastMinuteRequests.filter(
+        timestamp => timestamp > oneMinuteAgo
+      );
+      
+      this.metrics.requestsPerMinute = this.metrics.lastMinuteRequests.length;
+    }, 10000); // 每10秒更新一次
+  }
+  
+  recordRequest(processingTime) {
+    this.metrics.requests++;
+    this.metrics.totalProcessingTime += processingTime;
+    this.metrics.averageProcessingTime = this.metrics.totalProcessingTime / this.metrics.requests;
+    this.metrics.lastMinuteRequests.push(Date.now());
+  }
+  
+  recordError() {
+    this.metrics.errors++;
+  }
+  
+  getMetrics() {
+    const uptime = Date.now() - this.metrics.startTime;
+    return {
+      ...this.metrics,
+      uptime,
+      errorRate: this.metrics.errors / Math.max(this.metrics.requests, 1),
+      currentMemory: process.memoryUsage(),
+      timestamp: new Date().toISOString()
+    };
+  }
+  
+  getHealthStatus() {
+    const metrics = this.getMetrics();
+    const isHealthy = 
+      metrics.errorRate < 0.1 && // 错误率小于10%
+      metrics.currentMemory.heapUsed < 2 * 1024 * 1024 * 1024 && // 内存小于2GB
+      metrics.requestsPerMinute < 100; // 每分钟请求少于100
+    
+    return {
+      status: isHealthy ? 'healthy' : 'unhealthy',
+      metrics
+    };
+  }
+}
+
+// ========== 资源管理器 ==========
+class ResourceManager {
+  constructor() {
+    this.tempFiles = new Map();
+    this.tempDirs = new Map();
+    this.cleanupInterval = null;
+    this.maxAge = 30 * 60 * 1000; // 30分钟
+    this.maxTempFiles = 1000; // 最大临时文件数
+    
+    this.startCleanupScheduler();
+    this.setupGracefulShutdown();
+    this.startupCleanup();
+  }
+  
+  startupCleanup() {
+    // 启动时清理旧的临时文件
+    logger.info('开始启动清理...');
+    const uploadDir = path.join(os.tmpdir(), 'video_analyze');
+    
+    if (fs.existsSync(uploadDir)) {
+      try {
+        const files = fs.readdirSync(uploadDir);
+        let cleanedCount = 0;
+        
+        for (const file of files) {
+          const filePath = path.join(uploadDir, file);
+          const stats = fs.statSync(filePath);
+          const age = Date.now() - stats.mtime.getTime();
+          
+          if (age > this.maxAge) {
+            if (stats.isDirectory()) {
+              fs.rmSync(filePath, { recursive: true, force: true });
+            } else {
+              fs.unlinkSync(filePath);
+            }
+            cleanedCount++;
+          }
+        }
+        
+        logger.info('启动清理完成', { cleanedFiles: cleanedCount });
+      } catch (error) {
+        logger.warn('启动清理失败', { error: error.message });
+      }
+    }
+  }
+  
+  registerTempFile(filePath) {
+    this.tempFiles.set(filePath, {
+      path: filePath,
+      createdAt: Date.now(),
+      size: this.getFileSize(filePath)
+    });
+    
+    // 防止临时文件过多
+    if (this.tempFiles.size > this.maxTempFiles) {
+      this.forceCleanupOldest();
+    }
+  }
+  
+  registerTempDir(dirPath) {
+    this.tempDirs.set(dirPath, {
+      path: dirPath,
+      createdAt: Date.now()
+    });
+  }
+  
+  getFileSize(filePath) {
+    try {
+      return fs.existsSync(filePath) ? fs.statSync(filePath).size : 0;
+    } catch {
+      return 0;
+    }
+  }
+  
+  forceCleanupOldest() {
+    const sortedFiles = Array.from(this.tempFiles.values())
+      .sort((a, b) => a.createdAt - b.createdAt);
+    
+    const toClean = sortedFiles.slice(0, Math.floor(this.maxTempFiles * 0.2));
+    
+    for (const fileInfo of toClean) {
+      this.cleanupImmediate(fileInfo.path);
+    }
+  }
+  
+  startCleanupScheduler() {
+    this.cleanupInterval = setInterval(() => {
+      this.cleanupOldFiles();
+    }, 5 * 60 * 1000); // 每5分钟清理一次
+  }
+  
+  cleanupOldFiles() {
+    const now = Date.now();
+    let cleanedFiles = 0;
+    let cleanedDirs = 0;
+    let totalSizeCleaned = 0;
+    
+    // 清理旧的临时文件
+    for (const [filePath, fileInfo] of this.tempFiles) {
+      if (now - fileInfo.createdAt > this.maxAge) {
+        try {
+          if (fs.existsSync(fileInfo.path)) {
+            totalSizeCleaned += fileInfo.size;
+            fs.unlinkSync(fileInfo.path);
+            cleanedFiles++;
+          }
+          this.tempFiles.delete(filePath);
+        } catch (error) {
+          logger.warn('清理临时文件失败', { path: fileInfo.path, error: error.message });
+        }
+      }
+    }
+    
+    // 清理旧的临时目录
+    for (const [dirPath, dirInfo] of this.tempDirs) {
+      if (now - dirInfo.createdAt > this.maxAge) {
+        try {
+          if (fs.existsSync(dirInfo.path)) {
+            fs.rmSync(dirInfo.path, { recursive: true, force: true });
+            cleanedDirs++;
+          }
+          this.tempDirs.delete(dirPath);
+        } catch (error) {
+          logger.warn('清理临时目录失败', { path: dirInfo.path, error: error.message });
+        }
+      }
+    }
+    
+    if (cleanedFiles > 0 || cleanedDirs > 0) {
+      logger.info('定期清理完成', { 
+        cleanedFiles, 
+        cleanedDirs, 
+        totalSizeMB: (totalSizeCleaned / 1024 / 1024).toFixed(2)
+      });
+    }
+  }
+  
+  setupGracefulShutdown() {
+    const cleanup = (signal) => {
+      logger.info(`收到${signal}信号，开始应用关闭清理...`);
+      
+      if (this.cleanupInterval) {
+        clearInterval(this.cleanupInterval);
+      }
+      
+      let cleanedCount = 0;
+      
+      // 清理所有临时文件
+      this.tempFiles.forEach((fileInfo, filePath) => {
+        try {
+          if (fs.existsSync(fileInfo.path)) {
+            fs.unlinkSync(fileInfo.path);
+            cleanedCount++;
+          }
+        } catch (error) {
+          logger.warn('关闭时清理文件失败', { path: fileInfo.path, error: error.message });
+        }
+      });
+      
+      // 清理所有临时目录
+      this.tempDirs.forEach((dirInfo, dirPath) => {
+        try {
+          if (fs.existsSync(dirInfo.path)) {
+            fs.rmSync(dirInfo.path, { recursive: true, force: true });
+            cleanedCount++;
+          }
+        } catch (error) {
+          logger.warn('关闭时清理目录失败', { path: dirInfo.path, error: error.message });
+        }
+      });
+      
+      logger.info('应用清理完成', { cleanedCount });
+      
+      // 延迟退出确保日志写入
+      setTimeout(() => {
+        process.exit(0);
+      }, 1000);
+    };
+    
+    process.on('SIGINT', () => cleanup('SIGINT'));
+    process.on('SIGTERM', () => cleanup('SIGTERM'));
+    process.on('SIGUSR2', () => cleanup('SIGUSR2')); // nodemon重启
+  }
+  
+  cleanupImmediate(filePath) {
+    try {
+      if (fs.existsSync(filePath)) {
+        const stats = fs.statSync(filePath);
+        if (stats.isDirectory()) {
+          fs.rmSync(filePath, { recursive: true, force: true });
+          this.tempDirs.delete(filePath);
+        } else {
+          fs.unlinkSync(filePath);
+          this.tempFiles.delete(filePath);
+        }
+        return true;
+      }
+    } catch (error) {
+      logger.warn('立即清理失败', { path: filePath, error: error.message });
+      return false;
+    }
+    return false;
+  }
+  
+  getStats() {
+    const totalFiles = this.tempFiles.size;
+    const totalDirs = this.tempDirs.size;
+    const totalSize = Array.from(this.tempFiles.values())
+      .reduce((sum, file) => sum + file.size, 0);
+    
+    return {
+      tempFiles: totalFiles,
+      tempDirs: totalDirs,
+      totalSizeMB: (totalSize / 1024 / 1024).toFixed(2),
+      oldestFile: totalFiles > 0 ? Math.min(
+        ...Array.from(this.tempFiles.values()).map(f => f.createdAt)
+      ) : null
+    };
+  }
+}
+
+// ========== 错误处理器 ==========
+class ErrorHandler {
+  static handle(error, context = {}) {
+    const errorInfo = {
+      message: error.message,
+      stack: error.stack,
+      code: error.code,
+      context,
+      timestamp: new Date().toISOString()
+    };
+    
+    logger.error('处理错误', errorInfo);
+    performanceMonitor.recordError();
+    
+    return this.getErrorResponse(error);
+  }
+  
+  static getErrorResponse(error) {
+    // 根据错误类型返回不同的响应
+    if (error.name === 'ValidationError') {
+      return { status: 400, code: 'VALIDATION_ERROR', message: error.message };
+    }
+    
+    if (error.code === 'ENOENT') {
+      return { status: 404, code: 'FILE_NOT_FOUND', message: '文件不存在' };
+    }
+    
+    if (error.code === 'EACCES') {
+      return { status: 403, code: 'ACCESS_DENIED', message: '文件访问被拒绝' };
+    }
+    
+    if (error.message.includes('timeout')) {
+      return { status: 408, code: 'REQUEST_TIMEOUT', message: '请求超时' };
+    }
+    
+    if (error.message.includes('ffmpeg')) {
+      return { status: 500, code: 'VIDEO_PROCESSING_ERROR', message: '视频处理失败' };
+    }
+    
+    // 默认服务器错误
+    return { status: 500, code: 'INTERNAL_ERROR', message: '服务器内部错误' };
+  }
+}
+
+// ========== 全局实例 ==========
+const logger = new Logger();
+const performanceMonitor = new PerformanceMonitor();
+const resourceManager = new ResourceManager();
 
 // ========== 环境变量配置 ==========
 const VOICE_APPID = process.env.VOICE_APPID || 'e8f592b9';
@@ -38,6 +445,38 @@ const app = express();
 const uploadDir = path.join(os.tmpdir(), 'video_analyze');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
+// 请求速率限制
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15分钟
+  max: 100, // 每个IP限制100个请求
+  message: {
+    success: false,
+    error: '请求过于频繁，请稍后再试',
+    code: 'RATE_LIMIT_EXCEEDED'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    logger.warn('触发速率限制', { ip: req.ip, userAgent: req.get('User-Agent') });
+    res.status(429).json({
+      success: false,
+      error: '请求过于频繁，请稍后再试',
+      code: 'RATE_LIMIT_EXCEEDED'
+    });
+  }
+});
+
+// 分析接口的特殊限制
+const analyzeLimit = rateLimit({
+  windowMs: 60 * 1000, // 1分钟
+  max: 10, // 每分钟最多10次分析
+  message: {
+    success: false,
+    error: '分析请求过于频繁，请等待后重试',
+    code: 'ANALYZE_RATE_LIMIT'
+  }
+});
+
 // 文件存储配置
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
@@ -47,15 +486,18 @@ const storage = multer.diskStorage({
     const ext = path.extname(file.originalname) || '.webm';
     const basename = path.basename(file.originalname, ext) || 'recorded_video';
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, basename + '-' + uniqueSuffix + ext);
+    const filename = basename + '-' + uniqueSuffix + ext;
+    cb(null, filename);
   }
 });
 
-// 文件上传配置 - 支持摄像头录制的格式
+// 改进的文件上传配置
 const upload = multer({ 
   storage,
   limits: {
-    fileSize: 100 * 1024 * 1024 // 100MB 限制
+    fileSize: 100 * 1024 * 1024, // 100MB 限制
+    files: 1, // 只允许一个文件
+    fieldSize: 10 * 1024 * 1024 // 10MB字段大小限制
   },
   fileFilter: (req, file, cb) => {
     const allowedMimes = [
@@ -66,16 +508,76 @@ const upload = multer({
       'video/mov',
       'video/quicktime'
     ];
+    
     if (allowedMimes.includes(file.mimetype)) {
-      cb(null, true);
+      // 额外检查文件扩展名
+      const ext = path.extname(file.originalname).toLowerCase();
+      const allowedExts = ['.mp4', '.webm', '.ogg', '.avi', '.mov'];
+      
+      if (allowedExts.includes(ext)) {
+        cb(null, true);
+      } else {
+        cb(new Error('文件扩展名不支持'), false);
+      }
     } else {
-      cb(new Error('不支持的文件格式。支持的格式：MP4, WebM, OGG, AVI, MOV'));
+      cb(new Error('不支持的文件格式。支持的格式：MP4, WebM, OGG, AVI, MOV'), false);
     }
   }
 });
 
-app.use(express.json({ limit: '50mb' }));
+// 中间件配置
+app.use(express.json({ 
+  limit: '50mb',
+  verify: (req, res, buf) => {
+    // 验证JSON格式
+    try {
+      JSON.parse(buf);
+    } catch (e) {
+      const error = new Error('Invalid JSON format');
+      error.status = 400;
+      throw error;
+    }
+  }
+}));
+
 app.use(express.raw({ type: 'video/*', limit: '100mb' }));
+
+// 请求日志中间件
+app.use((req, res, next) => {
+  const start = Date.now();
+  const requestId = Math.random().toString(36).substr(2, 9);
+  
+  req.requestId = requestId;
+  req.startTime = start;
+  
+  logger.info('收到请求', {
+    requestId,
+    method: req.method,
+    url: req.url,
+    ip: req.ip,
+    userAgent: req.get('User-Agent'),
+    contentLength: req.get('Content-Length')
+  });
+  
+  // 响应完成时记录
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    const statusCode = res.statusCode;
+    
+    logger.info('请求完成', {
+      requestId,
+      statusCode,
+      duration: `${duration}ms`,
+      success: statusCode < 400
+    });
+    
+    if (statusCode < 400) {
+      performanceMonitor.recordRequest(duration);
+    }
+  });
+  
+  next();
+});
 
 // 改进的CORS配置
 app.use((req, res, next) => {
@@ -90,8 +592,12 @@ app.use((req, res, next) => {
   ];
   
   const origin = req.headers.origin;
-  if (allowedOrigins.includes(origin) || !origin) {
+  
+  // 开发环境允许所有origin，生产环境严格限制
+  if (process.env.NODE_ENV === 'development') {
     res.header("Access-Control-Allow-Origin", origin || "*");
+  } else if (allowedOrigins.includes(origin)) {
+    res.header("Access-Control-Allow-Origin", origin);
   }
   
   res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
@@ -105,15 +611,24 @@ app.use((req, res, next) => {
   next();
 });
 
+// 全局速率限制
+app.use(limiter);
+
 // ========== ffmpeg配置 ==========
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 // ========== 改进的工具函数 ==========
 
-// 验证视频文件完整性
-function validateVideoFile(videoPath) {
+// 流式文件验证
+function validateVideoFileStream(videoPath) {
   return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error('视频验证超时'));
+    }, 10000);
+    
     ffmpeg.ffprobe(videoPath, (err, metadata) => {
+      clearTimeout(timeout);
+      
       if (err) {
         reject(new Error('视频文件损坏或格式不支持: ' + err.message));
         return;
@@ -127,27 +642,30 @@ function validateVideoFile(videoPath) {
       const videoStream = metadata.streams.find(s => s.codec_type === 'video');
       const audioStream = metadata.streams.find(s => s.codec_type === 'audio');
       
-      console.log('视频信息:', {
-        duration: metadata.format.duration,
-        size: metadata.format.size,
-        hasVideo: !!videoStream,
-        hasAudio: !!audioStream,
-        videoCodec: videoStream?.codec_name,
-        audioCodec: audioStream?.codec_name
-      });
+      // 检查视频流是否有效
+      if (videoStream && videoStream.duration === '0.000000') {
+        reject(new Error('视频流时长为0，文件可能损坏'));
+        return;
+      }
       
-      resolve({
-        duration: metadata.format.duration,
+      const videoInfo = {
+        duration: parseFloat(metadata.format.duration) || 0,
         hasVideo: !!videoStream,
         hasAudio: !!audioStream,
         videoCodec: videoStream?.codec_name,
-        audioCodec: audioStream?.codec_name
-      });
+        audioCodec: audioStream?.codec_name,
+        bitrate: parseInt(metadata.format.bit_rate) || 0,
+        size: parseInt(metadata.format.size) || 0
+      };
+      
+      logger.info('视频验证成功', videoInfo);
+      resolve(videoInfo);
     });
   });
 }
 
-function extractFrames(videoPath, framesDir) {
+// 改进的帧提取函数
+function extractFramesOptimized(videoPath, framesDir) {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       reject(new Error('视频帧提取超时'));
@@ -155,26 +673,45 @@ function extractFrames(videoPath, framesDir) {
 
     try {
       fs.mkdirSync(framesDir, { recursive: true });
+      resourceManager.registerTempDir(framesDir);
       
-      ffmpeg(videoPath)
+      const command = ffmpeg(videoPath)
         .output(path.join(framesDir, 'frame_%04d.jpg'))
         .outputOptions([
-          '-vf', 'fps=1,scale=640:480', // 添加缩放以确保一致性
-          '-q:v', '2',  // 高质量
-          '-frames:v', '30' // 最多30帧，避免处理时间过长
-        ])
-        .on('end', () => {
-          clearTimeout(timeout);
-          resolve();
-        })
-        .on('error', (err) => {
-          clearTimeout(timeout);
-          reject(new Error(`视频帧提取失败: ${err.message}`));
-        })
-        .on('progress', (progress) => {
-          console.log(`帧提取进度: ${progress.percent?.toFixed(1) || 0}%`);
-        })
-        .run();
+          '-vf', 'fps=1,scale=640:480:force_original_aspect_ratio=decrease,pad=640:480:(ow-iw)/2:(oh-ih)/2',
+          '-q:v', '2',
+          '-frames:v', '30'
+        ]);
+      
+      command.on('end', () => {
+        clearTimeout(timeout);
+        
+        // 验证提取的帧
+        try {
+          const files = fs.readdirSync(framesDir).filter(f => f.endsWith('.jpg'));
+          if (files.length === 0) {
+            reject(new Error('未提取到任何视频帧'));
+          } else {
+            logger.info('帧提取完成', { frameCount: files.length });
+            resolve(files.length);
+          }
+        } catch (error) {
+          reject(new Error('读取提取的帧文件失败: ' + error.message));
+        }
+      });
+      
+      command.on('error', (err) => {
+        clearTimeout(timeout);
+        reject(new Error(`视频帧提取失败: ${err.message}`));
+      });
+      
+      command.on('progress', (progress) => {
+        if (progress.percent) {
+          logger.debug('帧提取进度', { percent: progress.percent.toFixed(1) });
+        }
+      });
+      
+      command.run();
     } catch (error) {
       clearTimeout(timeout);
       reject(new Error(`视频帧提取初始化失败: ${error.message}`));
@@ -182,14 +719,15 @@ function extractFrames(videoPath, framesDir) {
   });
 }
 
-function extractAudioMp3(videoPath, audioMp3Path) {
+// 改进的音频提取函数
+function extractAudioOptimized(videoPath, audioMp3Path) {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       reject(new Error('音频提取超时'));
     }, REQUEST_TIMEOUT);
 
     try {
-      ffmpeg(videoPath)
+      const command = ffmpeg(videoPath)
         .output(audioMp3Path)
         .audioCodec('libmp3lame')
         .audioFrequency(16000)
@@ -197,31 +735,40 @@ function extractAudioMp3(videoPath, audioMp3Path) {
         .audioBitrate('96k')
         .noVideo()
         .outputOptions([
-          '-af', 'volume=2.0', // 增加音量
-          '-ac', '1' // 强制单声道
-        ])
-        .on('end', () => {
-          clearTimeout(timeout);
-          // 检查输出文件是否存在且有内容
-          if (fs.existsSync(audioMp3Path)) {
-            const stats = fs.statSync(audioMp3Path);
-            if (stats.size > 0) {
-              resolve();
-            } else {
-              reject(new Error('音频文件为空'));
-            }
+          '-af', 'volume=2.0,highpass=f=80,lowpass=f=8000',
+          '-ac', '1'
+        ]);
+      
+      command.on('end', () => {
+        clearTimeout(timeout);
+        
+        // 验证输出文件
+        if (fs.existsSync(audioMp3Path)) {
+          const stats = fs.statSync(audioMp3Path);
+          if (stats.size > 0) {
+            resourceManager.registerTempFile(audioMp3Path);
+            logger.info('音频提取完成', { size: stats.size });
+            resolve();
           } else {
-            reject(new Error('音频文件生成失败'));
+            reject(new Error('音频文件为空'));
           }
-        })
-        .on('error', (err) => {
-          clearTimeout(timeout);
-          reject(new Error(`音频提取失败: ${err.message}`));
-        })
-        .on('progress', (progress) => {
-          console.log(`音频提取进度: ${progress.percent?.toFixed(1) || 0}%`);
-        })
-        .run();
+        } else {
+          reject(new Error('音频文件生成失败'));
+        }
+      });
+      
+      command.on('error', (err) => {
+        clearTimeout(timeout);
+        reject(new Error(`音频提取失败: ${err.message}`));
+      });
+      
+      command.on('progress', (progress) => {
+        if (progress.percent) {
+          logger.debug('音频提取进度', { percent: progress.percent.toFixed(1) });
+        }
+      });
+      
+      command.run();
     } catch (error) {
       clearTimeout(timeout);
       reject(new Error(`音频提取初始化失败: ${error.message}`));
@@ -274,7 +821,7 @@ function detectMp3Bitrate(buffer) {
       idx++;
     }
   } catch (error) {
-    console.warn('MP3比特率检测失败，使用默认值:', error.message);
+    logger.warn('MP3比特率检测失败，使用默认值', { error: error.message });
   }
   return 128; // 默认比特率
 }
@@ -287,11 +834,13 @@ function splitMp3BufferByDuration(buffer, minSeconds = 40, maxSeconds = 60, bitr
 
     let chunks = [];
     let offset = 0;
+    
     while (offset < buffer.length) {
       let end = Math.min(offset + maxBytes, buffer.length);
       let chunk = buffer.slice(offset, end);
 
       if (chunk.length < minBytes && chunks.length > 0) {
+        // 合并到上一个块
         let last = chunks.pop();
         let merged = Buffer.concat([last, chunk]);
         chunks.push(merged);
@@ -301,23 +850,26 @@ function splitMp3BufferByDuration(buffer, minSeconds = 40, maxSeconds = 60, bitr
         offset += chunk.length;
       }
     }
+    
     return chunks;
   } catch (error) {
     throw new Error(`音频分块失败: ${error.message}`);
   }
 }
 
+// 改进的WebSocket语音识别
 function startIatMp3Buffer(audioBuffer) {
   return new Promise((resolve, reject) => {
     let ws;
     let timeout;
     let interval;
+    let connectionStartTime = Date.now();
     
     // 设置总体超时
     timeout = setTimeout(() => {
       if (ws) ws.close();
       if (interval) clearInterval(interval);
-      reject(new Error('语音识别超时'));
+      reject(new Error(`语音识别超时 (${WS_TIMEOUT}ms)`));
     }, WS_TIMEOUT);
 
     try {
@@ -329,8 +881,13 @@ function startIatMp3Buffer(audioBuffer) {
     }
 
     let resultArr = [];
+    let isConnected = false;
 
     ws.on('open', () => {
+      isConnected = true;
+      const connectionTime = Date.now() - connectionStartTime;
+      logger.debug('WebSocket连接成功', { connectionTime });
+      
       try {
         const gen = mp3AudioFrameGenerator(audioBuffer);
         const first = gen.next().value;
@@ -341,7 +898,8 @@ function startIatMp3Buffer(audioBuffer) {
           return reject(new Error('音频数据为空'));
         }
 
-        ws.send(JSON.stringify({
+        // 发送第一帧
+        const firstMessage = {
           common: { app_id: VOICE_APPID },
           business: {
             language: "zh_cn",
@@ -356,8 +914,11 @@ function startIatMp3Buffer(audioBuffer) {
             encoding: "mp3",
             audio: first.frame.toString('base64')
           }
-        }));
+        };
+        
+        ws.send(JSON.stringify(firstMessage));
 
+        // 定期发送后续帧
         interval = setInterval(() => {
           try {
             const next = gen.next();
@@ -368,14 +929,15 @@ function startIatMp3Buffer(audioBuffer) {
             }
             
             if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({
+              const message = {
                 data: {
                   status: next.value.isLast ? 2 : 1,
                   format: "mp3",
                   encoding: "mp3",
                   audio: next.value.frame.toString('base64')
                 }
-              }));
+              };
+              ws.send(JSON.stringify(message));
             }
             
             if (next.value.isLast) {
@@ -405,7 +967,7 @@ function startIatMp3Buffer(audioBuffer) {
           item.cw ? item.cw.map(cw => cw.w || '').join('') : ''
         ).join('');
       } catch (error) {
-        console.warn('文本提取失败:', error);
+        logger.warn('文本提取失败', { error: error.message });
         return '';
       }
     }
@@ -413,6 +975,7 @@ function startIatMp3Buffer(audioBuffer) {
     ws.on('message', (data) => {
       try {
         const res = JSON.parse(data);
+        
         if (res.code !== 0) {
           clearTimeout(timeout);
           if (interval) clearInterval(interval);
@@ -441,7 +1004,9 @@ function startIatMp3Buffer(audioBuffer) {
           clearTimeout(timeout);
           if (interval) clearInterval(interval);
           ws.close();
-          resolve(resultArr.join(''));
+          const finalText = resultArr.join('').trim();
+          logger.info('语音识别完成', { textLength: finalText.length });
+          resolve(finalText);
         }
       } catch (err) {
         clearTimeout(timeout);
@@ -454,13 +1019,16 @@ function startIatMp3Buffer(audioBuffer) {
     ws.on('error', (err) => {
       clearTimeout(timeout);
       if (interval) clearInterval(interval);
-      reject(new Error(`WebSocket错误: ${err.message}`));
+      const errorMsg = isConnected ? 
+        `WebSocket通信错误: ${err.message}` : 
+        `WebSocket连接失败: ${err.message}`;
+      reject(new Error(errorMsg));
     });
 
     ws.on('close', (code, reason) => {
       clearTimeout(timeout);
       if (interval) clearInterval(interval);
-      console.log(`WebSocket关闭: ${code} - ${reason}`);
+      logger.debug('WebSocket关闭', { code, reason: reason?.toString() });
     });
   });
 }
@@ -476,23 +1044,40 @@ async function recognizeMp3File(localMp3Path) {
       throw new Error('音频文件为空');
     }
     
+    if (stats.size > 50 * 1024 * 1024) { // 50MB限制
+      throw new Error('音频文件过大，超过50MB限制');
+    }
+    
     const buffer = fs.readFileSync(localMp3Path);
     const bitrateKbps = detectMp3Bitrate(buffer);
     const chunks = splitMp3BufferByDuration(buffer, 40, 60, bitrateKbps);
     
+    logger.info('开始语音识别', { 
+      fileSize: stats.size, 
+      bitrate: bitrateKbps, 
+      chunks: chunks.length 
+    });
+    
     let results = [];
     for (let i = 0; i < chunks.length; i++) {
       try {
-        console.log(`处理音频块 ${i + 1}/${chunks.length}`);
+        logger.debug(`处理音频块 ${i + 1}/${chunks.length}`);
         const text = await startIatMp3Buffer(chunks[i]);
         results.push(text);
+        
+        // 块之间短暂延迟避免频率限制
+        if (i < chunks.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
       } catch (e) {
-        console.warn(`音频块 ${i + 1} 识别失败:`, e.message);
+        logger.warn(`音频块 ${i + 1} 识别失败`, { error: e.message });
         results.push('');
       }
     }
     
-    return results.join('');
+    const finalResult = results.join('').trim();
+    logger.info('语音识别完成', { resultLength: finalResult.length });
+    return finalResult;
   } catch (error) {
     throw new Error(`语音识别失败: ${error.message}`);
   }
@@ -515,64 +1100,186 @@ function generateFaceSignature(imageName) {
 }
 
 async function analyzeImageEmotion(imgPath) {
-  try {
-    if (!fs.existsSync(imgPath)) {
-      throw new Error(`图像文件不存在: ${imgPath}`);
-    }
-    
-    const stats = fs.statSync(imgPath);
-    if (stats.size === 0) {
-      throw new Error('图像文件为空');
-    }
-    
-    const fileName = path.basename(imgPath);
-    const imageBuffer = fs.readFileSync(imgPath);
-    const { curTime, xParam, signature } = generateFaceSignature(fileName);
-    
-    const headers = {
-      "X-Appid": FACE_APPID,
-      "X-CurTime": curTime,
-      "X-CheckSum": signature,
-      "X-Param": xParam,
-      "Content-Type": "image/jpeg",
-    };
-    
-    const response = await axios.post(FACE_API_URL, imageBuffer, { 
-      headers,
-      timeout: REQUEST_TIMEOUT,
-      maxBodyLength: Infinity,
-      maxContentLength: Infinity
-    });
-    
-    return response.data;
-  } catch (error) {
-    if (error.response) {
-      throw new Error(`表情分析API错误: ${error.response.status} - ${error.response.data?.message || '未知错误'}`);
-    } else if (error.request) {
-      throw new Error('表情分析服务无响应，请检查网络连接');
-    } else {
-      throw new Error(`表情分析失败: ${error.message}`);
+  const maxRetries = 3;
+  let lastError;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      if (!fs.existsSync(imgPath)) {
+        throw new Error(`图像文件不存在: ${imgPath}`);
+      }
+      
+      const stats = fs.statSync(imgPath);
+      if (stats.size === 0) {
+        throw new Error('图像文件为空');
+      }
+      
+      if (stats.size > 10 * 1024 * 1024) { // 10MB限制
+        throw new Error('图像文件过大，超过10MB限制');
+      }
+      
+      const fileName = path.basename(imgPath);
+      const imageBuffer = fs.readFileSync(imgPath);
+      const { curTime, xParam, signature } = generateFaceSignature(fileName);
+      
+      const headers = {
+        "X-Appid": FACE_APPID,
+        "X-CurTime": curTime,
+        "X-CheckSum": signature,
+        "X-Param": xParam,
+        "Content-Type": "image/jpeg",
+        "User-Agent": "VideoAnalysisServer/1.0"
+      };
+      
+      const response = await axios.post(FACE_API_URL, imageBuffer, { 
+        headers,
+        timeout: REQUEST_TIMEOUT,
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+        validateStatus: (status) => status < 500 // 只对5xx错误进行重试
+      });
+      
+      if (response.status === 200) {
+        return response.data;
+      } else {
+        throw new Error(`API返回错误状态: ${response.status}`);
+      }
+      
+    } catch (error) {
+      lastError = error;
+      
+      if (error.response) {
+        const errorMsg = `表情分析API错误: ${error.response.status} - ${error.response.data?.message || '未知错误'}`;
+        
+        // 对于4xx错误不重试
+        if (error.response.status >= 400 && error.response.status < 500) {
+          throw new Error(errorMsg);
+        }
+        
+        logger.warn(`表情分析失败，尝试 ${attempt}/${maxRetries}`, { 
+          error: errorMsg,
+          status: error.response.status
+        });
+      } else if (error.request) {
+        logger.warn(`表情分析网络错误，尝试 ${attempt}/${maxRetries}`, {
+          error: '服务无响应',
+          timeout: REQUEST_TIMEOUT
+        });
+      } else {
+        logger.warn(`表情分析处理错误，尝试 ${attempt}/${maxRetries}`, {
+          error: error.message
+        });
+      }
+      
+      // 最后一次尝试失败则抛出错误
+      if (attempt === maxRetries) {
+        if (error.response) {
+          throw new Error(`表情分析API错误: ${error.response.status} - ${error.response.data?.message || '未知错误'}`);
+        } else if (error.request) {
+          throw new Error('表情分析服务无响应，请检查网络连接');
+        } else {
+          throw new Error(`表情分析失败: ${error.message}`);
+        }
+      }
+      
+      // 重试前等待
+      await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
     }
   }
 }
 
 // ========== 改进的API路由 ==========
 
+// 健康检查接口
+app.get('/health', (req, res) => {
+  const health = performanceMonitor.getHealthStatus();
+  const resourceStats = resourceManager.getStats();
+  
+  res.status(health.status === 'healthy' ? 200 : 503).json({ 
+    status: health.status,
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    environment: {
+      nodeVersion: process.version,
+      platform: process.platform,
+      arch: process.arch,
+      memory: {
+        used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+        total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
+      }
+    },
+    performance: health.metrics,
+    resources: resourceStats
+  });
+});
+
+// 服务器信息接口
+app.get('/api/info', (req, res) => {
+  res.json({
+    name: 'Video Analysis Server',
+    version: '3.0.0',
+    timestamp: new Date().toISOString(),
+    capabilities: {
+      videoFormats: ['mp4', 'webm', 'ogg', 'avi', 'mov'],
+      maxFileSize: '100MB',
+      features: [
+        'emotion-analysis', 
+        'speech-recognition', 
+        'frame-extraction', 
+        'video-validation',
+        'rate-limiting',
+        'performance-monitoring',
+        'resource-management'
+      ]
+    },
+    limits: {
+      requestsPerWindow: '100/15min',
+      analysisRequests: '10/min',
+      maxVideoSize: '100MB',
+      maxProcessingTime: '120s'
+    }
+  });
+});
+
+// 性能指标接口
+app.get('/api/metrics', (req, res) => {
+  // 简单的认证检查
+  const authToken = req.headers.authorization;
+  if (process.env.METRICS_TOKEN && authToken !== `Bearer ${process.env.METRICS_TOKEN}`) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  const metrics = performanceMonitor.getMetrics();
+  const resourceStats = resourceManager.getStats();
+  
+  res.json({
+    performance: metrics,
+    resources: resourceStats,
+    system: {
+      cpuUsage: process.cpuUsage(),
+      memoryUsage: process.memoryUsage(),
+      uptime: process.uptime(),
+      pid: process.pid
+    }
+  });
+});
+
 // 支持文件上传的原有接口（兼容性保留）
-app.post('/api/video/analyze', upload.single('file'), async (req, res) => {
+app.post('/api/video/analyze', analyzeLimit, upload.single('file'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ 
       success: false,
       error: '未收到视频文件',
-      code: 'MISSING_FILE'
+      code: 'MISSING_FILE',
+      requestId: req.requestId
     });
   }
   
-  await processVideo(req.file.path, res);
+  await processVideoWithLogging(req.file.path, res, req.requestId);
 });
 
 // 改进的Base64视频数据接口
-app.post('/api/video/analyze-base64', async (req, res) => {
+app.post('/api/video/analyze-base64', analyzeLimit, async (req, res) => {
   let tempVideoPath = null;
   
   try {
@@ -582,7 +1289,8 @@ app.post('/api/video/analyze-base64', async (req, res) => {
       return res.status(400).json({ 
         success: false,
         error: '未收到视频数据',
-        code: 'MISSING_VIDEO_DATA'
+        code: 'MISSING_VIDEO_DATA',
+        requestId: req.requestId
       });
     }
     
@@ -600,7 +1308,8 @@ app.post('/api/video/analyze-base64', async (req, res) => {
       return res.status(400).json({
         success: false,
         error: '视频数据格式错误',
-        code: 'INVALID_VIDEO_FORMAT'
+        code: 'INVALID_VIDEO_FORMAT',
+        requestId: req.requestId
       });
     }
     
@@ -611,7 +1320,8 @@ app.post('/api/video/analyze-base64', async (req, res) => {
       return res.status(400).json({
         success: false,
         error: 'Base64解码失败',
-        code: 'BASE64_DECODE_ERROR'
+        code: 'BASE64_DECODE_ERROR',
+        requestId: req.requestId
       });
     }
     
@@ -619,7 +1329,17 @@ app.post('/api/video/analyze-base64', async (req, res) => {
       return res.status(400).json({
         success: false,
         error: '视频数据为空',
-        code: 'EMPTY_VIDEO_DATA'
+        code: 'EMPTY_VIDEO_DATA',
+        requestId: req.requestId
+      });
+    }
+    
+    if (videoBuffer.length > 100 * 1024 * 1024) {
+      return res.status(413).json({
+        success: false,
+        error: '视频数据过大，超过100MB限制',
+        code: 'FILE_TOO_LARGE',
+        requestId: req.requestId
       });
     }
     
@@ -628,55 +1348,60 @@ app.post('/api/video/analyze-base64', async (req, res) => {
     const isValidMP4 = videoBuffer.slice(4, 8).toString() === 'ftyp';
     
     if (!isValidWebM && !isValidMP4) {
-      console.warn('视频数据可能损坏，但继续处理...');
+      logger.warn('视频数据可能损坏，但继续处理...', { requestId: req.requestId });
     }
     
     // 保存临时文件，使用更安全的文件名
     const ext = path.extname(filename) || '.webm';
-    const safeFilename = `temp_${Date.now()}_${Math.floor(Math.random()*10000)}${ext}`;
+    const safeFilename = `temp_${Date.now()}_${Math.floor(Math.random()*10000)}_${req.requestId}${ext}`;
     tempVideoPath = path.join(uploadDir, safeFilename);
     
     try {
       fs.writeFileSync(tempVideoPath, videoBuffer);
-      console.log(`临时视频文件已保存: ${tempVideoPath}, 大小: ${videoBuffer.length} bytes`);
+      resourceManager.registerTempFile(tempVideoPath);
+      
+      logger.info('临时视频文件已保存', { 
+        path: tempVideoPath, 
+        size: videoBuffer.length,
+        requestId: req.requestId
+      });
     } catch (error) {
       return res.status(500).json({
         success: false,
         error: '临时文件保存失败: ' + error.message,
-        code: 'FILE_SAVE_ERROR'
+        code: 'FILE_SAVE_ERROR',
+        requestId: req.requestId
       });
     }
     
-    await processVideo(tempVideoPath, res);
+    await processVideoWithLogging(tempVideoPath, res, req.requestId);
     
   } catch (error) {
-    console.error('Base64视频处理错误:', error);
+    logger.error('Base64视频处理错误', { error: error.message, requestId: req.requestId });
     
     // 清理临时文件
-    if (tempVideoPath && fs.existsSync(tempVideoPath)) {
-      try {
-        fs.unlinkSync(tempVideoPath);
-      } catch (e) {
-        console.warn('清理临时文件失败:', e.message);
-      }
+    if (tempVideoPath) {
+      resourceManager.cleanupImmediate(tempVideoPath);
     }
     
-    res.status(500).json({ 
+    const errorResponse = ErrorHandler.handle(error, { requestId: req.requestId });
+    res.status(errorResponse.status).json({ 
       success: false,
-      error: '视频处理失败: ' + error.message,
-      code: 'PROCESSING_ERROR'
+      error: errorResponse.message,
+      code: errorResponse.code,
+      requestId: req.requestId
     });
   }
 });
 
 // 改进的通用视频处理函数
-async function processVideo(videoPath, res) {
+async function processVideoWithLogging(videoPath, res, requestId) {
   const startTime = Date.now();
-  const framesDir = path.join(uploadDir, `frames_${Date.now()}_${Math.floor(Math.random()*10000)}`);
-  const audioMp3Path = path.join(uploadDir, `${Date.now()}_audio.mp3`);
+  const framesDir = path.join(uploadDir, `frames_${Date.now()}_${Math.floor(Math.random()*10000)}_${requestId}`);
+  const audioMp3Path = path.join(uploadDir, `${Date.now()}_audio_${requestId}.mp3`);
 
   try {
-    console.log('开始处理视频:', videoPath);
+    logger.info('开始处理视频', { videoPath, requestId });
     
     // 验证视频文件
     const stats = fs.statSync(videoPath);
@@ -684,40 +1409,43 @@ async function processVideo(videoPath, res) {
       throw new Error('视频文件为空');
     }
     
-    console.log(`视频文件大小: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
+    logger.info('视频文件大小检查通过', { 
+      sizeMB: (stats.size / 1024 / 1024).toFixed(2),
+      requestId 
+    });
 
     // 验证视频完整性
-    console.log('验证视频完整性...');
+    logger.info('开始验证视频完整性...', { requestId });
     let videoInfo;
     try {
-      videoInfo = await validateVideoFile(videoPath);
-      console.log('视频验证通过:', videoInfo);
+      videoInfo = await validateVideoFileStream(videoPath);
+      logger.info('视频验证通过', { videoInfo, requestId });
     } catch (error) {
       throw new Error(`视频文件验证失败: ${error.message}`);
     }
 
     // 1. 抽帧
-    console.log('开始抽帧...');
-    await extractFrames(videoPath, framesDir);
-    console.log('抽帧完成');
+    logger.info('开始抽帧...', { requestId });
+    const frameCount = await extractFramesOptimized(videoPath, framesDir);
+    logger.info('抽帧完成', { frameCount, requestId });
 
     // 2. 提取音频（仅当有音频流时）
     let audioPath = null;
     if (videoInfo.hasAudio) {
-      console.log('开始提取音频...');
+      logger.info('开始提取音频...', { requestId });
       try {
-        await extractAudioMp3(videoPath, audioMp3Path);
+        await extractAudioOptimized(videoPath, audioMp3Path);
         audioPath = audioMp3Path;
-        console.log('音频提取完成');
+        logger.info('音频提取完成', { requestId });
       } catch (error) {
-        console.warn('音频提取失败，跳过语音识别:', error.message);
+        logger.warn('音频提取失败，跳过语音识别', { error: error.message, requestId });
       }
     } else {
-      console.log('视频中没有音频流，跳过音频处理');
+      logger.info('视频中没有音频流，跳过音频处理', { requestId });
     }
 
     // 3. 表情分析
-    console.log('开始表情分析...');
+    logger.info('开始表情分析...', { requestId });
     const frameFiles = fs.readdirSync(framesDir)
       .filter(f => f.endsWith('.jpg'))
       .sort((a, b) => {
@@ -726,53 +1454,71 @@ async function processVideo(videoPath, res) {
         return numA - numB;
       });
     
-    console.log(`找到 ${frameFiles.length} 个视频帧`);
+    logger.info(`找到视频帧`, { frameCount: frameFiles.length, requestId });
     const emotionResults = [];
     
-    for (let i = 0; i < frameFiles.length; i++) {
-      const frame = frameFiles[i];
-      try {
-        console.log(`分析第 ${i + 1}/${frameFiles.length} 帧: ${frame}`);
-        const imgPath = path.join(framesDir, frame);
-        const emotion = await analyzeImageEmotion(imgPath);
-        emotionResults.push({ 
-          frame, 
-          emotion,
-          timestamp: i // 添加时间戳信息
-        });
-      } catch (error) {
-        console.warn(`表情分析失败 - 帧: ${frame}`, error.message);
-        emotionResults.push({ 
-          frame, 
-          emotion: { 
-            error: error.message,
-            code: 'EMOTION_ANALYSIS_FAILED'
-          },
-          timestamp: i
-        });
+    // 并发处理表情分析（限制并发数避免过载）
+    const concurrencyLimit = 3;
+    for (let i = 0; i < frameFiles.length; i += concurrencyLimit) {
+      const batch = frameFiles.slice(i, i + concurrencyLimit);
+      const batchPromises = batch.map(async (frame, batchIndex) => {
+        const frameIndex = i + batchIndex;
+        try {
+          logger.debug(`分析第 ${frameIndex + 1}/${frameFiles.length} 帧: ${frame}`, { requestId });
+          const imgPath = path.join(framesDir, frame);
+          const emotion = await analyzeImageEmotion(imgPath);
+          return { 
+            frame, 
+            emotion,
+            timestamp: frameIndex,
+            index: frameIndex
+          };
+        } catch (error) {
+          logger.warn(`表情分析失败 - 帧: ${frame}`, { error: error.message, requestId });
+          return { 
+            frame, 
+            emotion: { 
+              error: error.message,
+              code: 'EMOTION_ANALYSIS_FAILED'
+            },
+            timestamp: frameIndex,
+            index: frameIndex
+          };
+        }
+      });
+      
+      const batchResults = await Promise.all(batchPromises);
+      emotionResults.push(...batchResults);
+      
+      // 批次间短暂延迟
+      if (i + concurrencyLimit < frameFiles.length) {
+        await new Promise(resolve => setTimeout(resolve, 200));
       }
     }
     
-    console.log('表情分析完成');
+    // 按索引排序结果
+    emotionResults.sort((a, b) => a.index - b.index);
+    
+    logger.info('表情分析完成', { requestId });
 
     // 4. 语音识别
     let asrText = '';
     let asrError = null;
     
     if (audioPath && fs.existsSync(audioPath)) {
-      console.log('开始语音识别...');
+      logger.info('开始语音识别...', { requestId });
       try {
         asrText = await recognizeMp3File(audioPath);
-        console.log('语音识别完成');
+        logger.info('语音识别完成', { textLength: asrText.length, requestId });
       } catch (error) {
-        console.warn('语音识别失败:', error.message);
+        logger.warn('语音识别失败', { error: error.message, requestId });
         asrError = {
           message: error.message,
           code: 'ASR_FAILED'
         };
       }
     } else {
-      console.log('跳过语音识别（无音频文件）');
+      logger.info('跳过语音识别（无音频文件）', { requestId });
       asrError = {
         message: '视频中无音频数据',
         code: 'NO_AUDIO'
@@ -789,6 +1535,7 @@ async function processVideo(videoPath, res) {
       processedFrames: frameFiles.length,
       processingTimeMs: processingTime,
       timestamp: new Date().toISOString(),
+      requestId,
       videoInfo: {
         ...videoInfo,
         size: stats.size,
@@ -796,88 +1543,49 @@ async function processVideo(videoPath, res) {
       }
     };
     
-    console.log(`视频处理完成，耗时: ${processingTime}ms`);
+    logger.info('视频处理完成', { processingTime, requestId });
+    performanceMonitor.recordRequest(processingTime);
     res.json(result);
     
   } catch (error) {
-    console.error('视频处理错误:', error);
     const processingTime = Date.now() - startTime;
+    const errorResponse = ErrorHandler.handle(error, { 
+      requestId,
+      processingTime,
+      videoPath 
+    });
     
-    res.status(500).json({ 
+    logger.error('视频处理失败', { 
+      error: error.message, 
+      processingTime,
+      requestId 
+    });
+    
+    res.status(errorResponse.status).json({ 
       success: false, 
-      error: error.message,
-      code: 'VIDEO_PROCESSING_ERROR',
+      error: errorResponse.message,
+      code: errorResponse.code,
       processingTimeMs: processingTime,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      requestId
     });
   } finally {
     // 延迟清理临时文件，确保响应已发送
     setTimeout(() => {
-      try { 
-        if (fs.existsSync(videoPath)) {
-          fs.unlinkSync(videoPath);
-          console.log('临时视频文件已清理:', videoPath);
-        }
-      } catch (e) { 
-        console.warn('清理视频文件失败:', e.message); 
-      }
-      
-      try { 
-        if (fs.existsSync(audioMp3Path)) {
-          fs.unlinkSync(audioMp3Path);
-          console.log('临时音频文件已清理:', audioMp3Path);
-        }
-      } catch (e) { 
-        console.warn('清理音频文件失败:', e.message); 
-      }
-      
-      try { 
-        if (fs.existsSync(framesDir)) {
-          fs.rmSync(framesDir, { recursive: true, force: true });
-          console.log('临时帧文件夹已清理:', framesDir);
-        }
-      } catch (e) { 
-        console.warn('清理帧文件夹失败:', e.message); 
-      }
-    }, 3000); // 增加延迟时间确保响应完成
+      resourceManager.cleanupImmediate(videoPath);
+      resourceManager.cleanupImmediate(audioMp3Path);
+      resourceManager.cleanupImmediate(framesDir);
+    }, 5000); // 增加延迟时间确保响应完成
   }
 }
 
-// 健康检查接口
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    environment: {
-      nodeVersion: process.version,
-      platform: process.platform,
-      arch: process.arch,
-      memory: {
-        used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
-        total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
-      }
-    }
-  });
-});
-
-// 服务器信息接口
-app.get('/api/info', (req, res) => {
-  res.json({
-    name: 'Video Analysis Server',
-    version: '2.1.0',
-    timestamp: new Date().toISOString(),
-    capabilities: {
-      videoFormats: ['mp4', 'webm', 'ogg', 'avi', 'mov'],
-      maxFileSize: '100MB',
-      features: ['emotion-analysis', 'speech-recognition', 'frame-extraction', 'video-validation']
-    }
-  });
-});
-
 // 改进的错误处理中间件
 app.use((error, req, res, next) => {
-  console.error('服务器错误:', error);
+  const errorResponse = ErrorHandler.handle(error, { 
+    url: req.url,
+    method: req.method,
+    requestId: req.requestId
+  });
   
   // Multer错误处理
   if (error instanceof multer.MulterError) {
@@ -885,22 +1593,24 @@ app.use((error, req, res, next) => {
       return res.status(413).json({
         success: false,
         error: '文件太大，最大支持100MB',
-        code: 'FILE_TOO_LARGE'
+        code: 'FILE_TOO_LARGE',
+        requestId: req.requestId
       });
     }
     return res.status(400).json({
       success: false,
       error: '文件上传错误: ' + error.message,
-      code: 'UPLOAD_ERROR'
+      code: 'UPLOAD_ERROR',
+      requestId: req.requestId
     });
   }
   
-  // 通用错误处理
-  res.status(500).json({ 
+  res.status(errorResponse.status).json({ 
     success: false,
-    error: '服务器内部错误',
-    code: 'INTERNAL_SERVER_ERROR',
-    timestamp: new Date().toISOString()
+        error: errorResponse.message,
+    code: errorResponse.code,
+    timestamp: new Date().toISOString(),
+    requestId: req.requestId || 'unknown'
   });
 });
 
@@ -910,27 +1620,93 @@ app.use((req, res) => {
     success: false,
     error: '接口不存在',
     code: 'NOT_FOUND',
-    path: req.path
+    path: req.path,
+    method: req.method,
+    timestamp: new Date().toISOString()
   });
 });
 
+// 未捕获异常处理
+process.on('uncaughtException', (error) => {
+  console.error('未捕获异常:', error.message);
+  console.error('堆栈:', error.stack);
+  
+  // 优雅关闭
+  setTimeout(() => {
+    process.exit(1);
+  }, 5000);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('未处理的Promise拒绝:', reason?.message || reason);
+});
+
+// 服务器启动
 const port = process.env.PORT || 3100;
-app.listen(port, () => {
+const server = app.listen(port, () => {
   console.log(`=== Video Analysis Server Started ===`);
   console.log(`Server URL: http://localhost:${port}`);
   console.log(`Health Check: http://localhost:${port}/health`);
   console.log(`Server Info: http://localhost:${port}/api/info`);
   console.log(`Upload Directory: ${uploadDir}`);
+  console.log(`Process ID: ${process.pid}`);
+  console.log(`Node Version: ${process.version}`);
   console.log(`=== Ready to accept requests ===`);
 });
 
-// 优雅关闭处理
-process.on('SIGINT', () => {
-  console.log('\n正在关闭服务器...');
-  process.exit(0);
+// 服务器优雅关闭
+const gracefulShutdown = (signal) => {
+  console.log(`\n收到${signal}信号，开始优雅关闭服务器...`);
+  
+  server.close((err) => {
+    if (err) {
+      console.error('服务器关闭错误:', err.message);
+      process.exit(1);
+    }
+    
+    console.log('服务器已停止接收新连接');
+    
+    // 等待现有连接完成
+    setTimeout(() => {
+      console.log('服务器优雅关闭完成');
+      process.exit(0);
+    }, 10000);
+  });
+  
+  // 强制关闭超时
+  setTimeout(() => {
+    console.warn('强制关闭服务器');
+    process.exit(1);
+  }, 15000);
+};
+
+process。on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process。on('SIGINT', () => gracefulShutdown('SIGINT'));
+process。on('SIGUSR2', () => gracefulShutdown('SIGUSR2')); // nodemon重启
+
+// 处理服务器错误
+server。on('error', (error) => {
+  if (error.code === 'EADDRINUSE') {
+    console.error(`端口 ${port} 已被占用`);
+    process.exit(1);
+  } else {
+    console.error('服务器错误:', error.message);
+  }
 });
 
-process.on('SIGTERM', () => {
-  console.log('\n服务器被终止');
-  process.exit(0);
-});
+// 定期性能监控
+setInterval(() => {
+  const memoryUsage = process.memoryUsage();
+  const memoryMB = (memoryUsage.heapUsed / 1024 / 1024).toFixed(2);
+  
+  if (memoryMB > 500) { // 内存使用超过500MB时警告
+    console.warn(`内存使用较高: ${memoryMB}MB`);
+  }
+  
+  // 只在开发模式下详细输出
+  if (process.env.NODE_ENV === 'development') {
+    console.log(`内存使用: ${memoryMB}MB | 运行时间: ${Math.floor(process.uptime())}秒`);
+  }
+}， 60000); // 每分钟检查一次
+
+module。exports = app;
