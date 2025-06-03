@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>视频表情与语音分析</title>
+</head>
+<body>
+  <h2>上传视频进行分析</h2>
+  <form id="videoForm">
+    <input type="file" id="videoInput" accept="video/mp4" required>
+    <button type="submit">上传并分析</button>
+  </form>
+  <div id="result"></div>
+  <script>
+    const form = document.getElementById('videoForm');
+    const videoInput = document.getElementById('videoInput');
+    const resultDiv = document.getElementById('result');
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const file = videoInput.files[0];
+      if (!file) return alert('请先选择视频');
+      const formData = new FormData();
+      formData.append('file'， file);
+      resultDiv.innerHTML = '处理中...';
+
+      try {
+        const resp = await fetch('http://localhost:3100/api/video/analyze'， {
+          method: 'POST',
+          body: formData
+        });
+        if (!resp.ok) throw new Error('服务异常');
+        const data = await resp.json();
+        resultDiv.innerHTML =
+          '<h3>音频文本识别：</h3><pre>' + (data.asrText || '无') + '</pre>' +
+          '<h3>表情变化：</h3><ul>' +
+          data.emotionTimeline.map(item =>
+            `<li>帧: ${item.frame}, 情感: ${JSON.stringify(item.emotion)}</li>`
+          )。join('') +
+          '</ul>';
+      } catch (err) {
+        resultDiv.innerHTML = '错误: ' + err.message;
+      }
+    };
+  </script>
+</body>
+</html>
