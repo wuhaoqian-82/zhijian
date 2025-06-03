@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>表情分析客户端</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+    }
+    h1 {
+      color: #333;
+    }
+    。progress {
+      margin-top: 10px;
+      font-size: 14px;
+      color: #555;
+    }
+    。result {
+      margin-top: 20px;
+    }
+    。analysis {
+      background: #f7fafc;
+      padding: 14px 12px;
+      border: 1px solid #ccd;
+      border-radius: 6px;
+      font-size: 16px;
+      color: #222;
+      margin-top: 10px;
+      white-space: pre-line;
+    }
+    。img-list { margin-top: 10px;}
+    。img-item { margin-bottom: 8px;}
+    。btn-analyze { margin-top: 16px; font-size: 16px; }
+  </style>
+</head>
+<body>
+  <h1>科大讯飞人脸表情分析</h1>
+  <form id="singleUploadForm">
+    <label>
+      <strong>逐张上传图片（最多10张）：</strong>
+      <input type="file" id="singleImageInput" accept="image/*" required />
+    </label>
+    <button type="submit">上传并分析该图片</button>
+  </form>
+  <div id="progress" class="progress"></div>
+  <div class="img-list" id="imgList"></div>
+  <button class="btn-analyze" id="analyzeBtn" disabled>分析所有图片的表情变化</button>
+  <div id="result" class="result"></div>
+
+  <script>
+    // 存储每张图片的分析结果
+    const analysisResults = [];
+
+    const maxImages = 10;
+    const serverUrl = `http://localhost:3000/analyze`;
+
+    const progressDiv = document.getElementById("progress");
+    const resultDiv = document.getElementById("result");
+    const imgListDiv = document.getElementById("imgList");
+    const analyzeBtn = document.getElementById("analyzeBtn");
+
+    // 逐张上传表单
+    document.getElementById("singleUploadForm").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      progressDiv.textContent = "";
+      resultDiv.innerHTML = "";
+
+      const fileInput = document.getElementById("singleImageInput");
+      if (!fileInput.files.length) {
+        alert("请选择需要上传的图片！");
+        return;
+      }
+      if (analysisResults.length >= maxImages) {
+        alert("最多只能上传10张图片！");
+        return;
+      }
+
+      const file = fileInput.files[0];
+      const formData = new FormData();
+      formData.append("images", file);
+
+      progressDiv.textContent = `正在上传并分析图片：${file.name} ...`;
+
+      try {
+        const response = await fetch(serverUrl, {
+          method: "POST",
+          body: formData,
+        });
+
+        if (!response.ok) {
+          let errorText = response.statusText;
+          try {
+            const errorData = await response.json();
+            errorText = errorData.error || errorText;
+          } catch {}
+          throw new Error(`图片分析失败：${errorText}`);
+        }
+
+        const result = await response.json();
+
+        if (result.success && result.analysisResults && result.analysisResults.length > 0) {
+          // 保存分析结果
+          analysisResults.push({
+            fileName: file.name,
+            ...result.analysisResults[0]
+          });
+          // 展示图片和分析结果
+          renderImgList();
+          progressDiv.textContent = `图片 ${file.name} 分析完成！可以继续上传下一张图片`;
+          analyzeBtn.disabled = false;
+        } else {
+          throw new Error(`图片分析失败：${result.error || "未知错误"}`);
+        }
+      } catch (error) {
+        progressDiv.textContent = "分析失败，请检查服务端是否正常运行！";
+        alert(`错误：${error.message}`);
+      }
+      // 清空文件选择
+      fileInput.value = "";
+    });
+
+    // 分析所有图片的表情变化
+    analyzeBtn.addEventListener("click", () => {
+      resultDiv.innerHTML = "";
+      if (analysisResults.length === 0) {
+        alert("请先上传并分析至少一张图片");
+        return;
+      }
+      // 假设AI返回结构为: { aiResult: { emotion: "高兴"/"悲伤"/... } }
+      const emotions = analysisResults.map(r =>
+        r.aiResult?.emotion ||
+        r.aiResult?.data?.emotion ||
+        "未知"
+      );
+      // 统计不同表情出现次数
+      const emotionCount = {};
+      emotions.forEach(e => {
+        emotionCount[e] = (emotionCount[e] || 0) + 1;
+      });
+      // 变化描述
+      let desc = `表情变化序列：${emotions.join(" → ")}\n\n`;
+      desc += `共分析${emotions.length}张图片。\n`;
+      desc += `情绪分布如下：\n`;
+      for (const [emotion, count] of Object.entries(emotionCount)) {
+        desc += `- ${emotion}：${count}次\n`;
+      }
+      // 简单判断是否有明显变化
+      if (emotions.length > 1 && emotions[0] !== emotions[emotions.length-1]) {
+        desc += `\n从第一张到最后一张，表情有明显变化。`;
+      } else {
+        desc += `\n表情整体变化不明显。`;
+      }
+      resultDiv.innerHTML = `
+        <h2>表情变化分析结果</h2>
+        <div class="analysis">${desc}</div>
+      `;
+    });
+
+    // 渲染图片列表和每张分析结果
+    function renderImgList() {
+      imgListDiv.innerHTML = "";
+      analysisResults.forEach((item, idx) => {
+        const emotion = item.aiResult?.emotion || item.aiResult?.data?.emotion || "未知";
+        imgListDiv.innerHTML += `
+          <div class="img-item">
+            <strong>图片${idx + 1}：</strong>${item.fileName}，分析表情：<b>${emotion}</b>
+          </div>
+        `;
+      });
+    }
+  </script>
+</body>
+</html>
