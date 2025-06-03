@@ -2,45 +2,384 @@
 <html lang="zh">
 <head>
   <meta charset="UTF-8">
-  <title>视频表情与语音分析</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>摄像头录制视频分析</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    .video-container {
+      text-align: center;
+      margin: 20px 0;
+    }
+    video {
+      max-width: 100%;
+      border: 2px solid #ddd;
+      border-radius: 8px;
+    }
+    .controls {
+      margin: 20px 0;
+      text-align: center;
+    }
+    button {
+      margin: 5px;
+      padding: 10px 20px;
+      font-size: 16px;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+    .start-btn { background-color: #4CAF50; color: white; }
+    .stop-btn { background-color: #f44336; color: white; }
+    .analyze-btn { background-color: #2196F3; color: white; }
+    .download-btn { background-color: #FF9800; color: white; }
+    button:disabled {
+      background-color: #cccccc;
+      cursor: not-allowed;
+    }
+    .status {
+      margin: 10px 0;
+      padding: 10px;
+      border-radius: 5px;
+      text-align: center;
+    }
+    .status.recording { background-color: #ffebee; color: #c62828; }
+    .status.ready { background-color: #e8f5e8; color: #2e7d32; }
+    .status.processing { background-color: #fff3e0; color: #ef6c00; }
+    #result {
+      margin: 20px 0;
+      padding: 15px;
+      border: 1px solid #ddd;
+      border-radius: 5px;
+      background-color: #f9f9f9;
+    }
+    .emotion-item {
+      margin: 5px 0;
+      padding: 8px;
+      background-color: white;
+      border-radius: 3px;
+      border-left: 4px solid #2196F3;
+    }
+    .recording-time {
+      font-size: 18px;
+      font-weight: bold;
+      color: #f44336;
+    }
+  </style>
 </head>
 <body>
-  <h2>上传视频进行分析</h2>
-  <form id="videoForm">
-    <input type="file" id="videoInput" accept="video/mp4" required>
-    <button type="submit">上传并分析</button>
-  </form>
+  <h2>摄像头录制视频表情与语音分析</h2>
+  
+  <div class="video-container">
+    <video id="preview" width="640" height="480" autoplay muted playsinline></video>
+  </div>
+  
+  <div class="controls">
+    <button id="startBtn" class="start-btn">开始录制</button>
+    <button id="stopBtn" class="stop-btn" disabled>停止录制</button>
+    <button id="analyzeBtn" class="analyze-btn" disabled>分析视频</button>
+    <button id="downloadBtn" class="download-btn" disabled>下载录制视频</button>
+  </div>
+  
+  <div id="status" class="status">点击"开始录制"开始录制视频</div>
+  <div id="recordingTime" class="recording-time" style="display: none;"></div>
+  
   <div id="result"></div>
-  <script>
-    const form = document.getElementById('videoForm');
-    const videoInput = document.getElementById('videoInput');
-    const resultDiv = document.getElementById('result');
-    form.onsubmit = async (e) => {
-      e.preventDefault();
-      const file = videoInput.files[0];
-      if (!file) return alert('请先选择视频');
-      const formData = new FormData();
-      formData.append('file'， file);
-      resultDiv.innerHTML = '处理中...';
 
-      try {
-        const resp = await fetch('http://localhost:3100/api/video/analyze'， {
-          method: 'POST',
-          body: formData
-        });
-        if (!resp.ok) throw new Error('服务异常');
-        const data = await resp.json();
-        resultDiv.innerHTML =
-          '<h3>音频文本识别：</h3><pre>' + (data.asrText || '无') + '</pre>' +
-          '<h3>表情变化：</h3><ul>' +
-          data.emotionTimeline.map(item =>
-            `<li>帧: ${item.frame}, 情感: ${JSON.stringify(item.emotion)}</li>`
-          )。join('') +
-          '</ul>';
-      } catch (err) {
-        resultDiv.innerHTML = '错误: ' + err.message;
+  <script>
+    class VideoRecorder {
+      constructor() {
+        this.mediaRecorder = null;
+        this.recordedChunks = [];
+        this.stream = null;
+        this.recordingStartTime = null;
+        this.recordingTimer = null;
+        
+        this.preview = document.getElementById('preview');
+        this.startBtn = document.getElementById('startBtn');
+        this.stopBtn = document.getElementById('stopBtn');
+        this.analyzeBtn = document.getElementById('analyzeBtn');
+        this.downloadBtn = document.getElementById('downloadBtn');
+        this.status = document.getElementById('status');
+        this.recordingTime = document.getElementById('recordingTime');
+        this.result = document.getElementById('result');
+        
+        this.init();
       }
-    };
+      
+      async init() {
+        try {
+          // 请求摄像头和麦克风权限
+          this.stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+              frameRate: { ideal: 30 }
+            },
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true
+            }
+          });
+          
+          this.preview.srcObject = this.stream;
+          this.setupEventListeners();
+          this.updateStatus('摄像头已准备就绪', 'ready');
+          
+        } catch (error) {
+          console.error('摄像头初始化失败:', error);
+          this.updateStatus('摄像头访问失败: ' + error.message, 'error');
+        }
+      }
+      
+      setupEventListeners() {
+        this.startBtn.addEventListener('click', () => this.startRecording());
+        this.stopBtn.addEventListener('click', () => this.stopRecording());
+        this.analyzeBtn.addEventListener('click', () => this.analyzeVideo());
+        this.downloadBtn.addEventListener('click', () => this.downloadVideo());
+      }
+      
+      async startRecording() {
+        try {
+          this.recordedChunks = [];
+          
+          // 配置录制选项
+          const options = {
+            mimeType: 'video/webm;codecs=vp9,opus',
+            videoBitsPerSecond: 1000000, // 1Mbps
+            audioBitsPerSecond: 128000   // 128kbps
+          };
+          
+          // 检查浏览器支持的格式
+          if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+            options.mimeType = 'video/webm';
+            if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+              options.mimeType = 'video/mp4';
+            }
+          }
+          
+          this.mediaRecorder = new MediaRecorder(this.stream, options);
+          
+          this.mediaRecorder.ondataavailable = (event) => {
+            if (event.data.size > 0) {
+              this.recordedChunks.push(event.data);
+            }
+          };
+          
+          this.mediaRecorder.onstop = () => {
+            this.onRecordingComplete();
+          };
+          
+          this.mediaRecorder.start(1000); // 每秒收集一次数据
+          
+          this.recordingStartTime = Date.now();
+          this.startRecordingTimer();
+          
+          this.startBtn.disabled = true;
+          this.stopBtn.disabled = false;
+          this.analyzeBtn.disabled = true;
+          this.downloadBtn.disabled = true;
+          
+          this.updateStatus('正在录制...', 'recording');
+          
+        } catch (error) {
+          console.error('开始录制失败:', error);
+          this.updateStatus('录制失败: ' + error.message, 'error');
+        }
+      }
+      
+      stopRecording() {
+        if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+          this.mediaRecorder.stop();
+        }
+        
+        this.stopRecordingTimer();
+        
+        this.startBtn.disabled = false;
+        this.stopBtn.disabled = true;
+        
+        this.updateStatus('录制完成，可以进行分析', 'ready');
+      }
+      
+      startRecordingTimer() {
+        this.recordingTime.style.display = 'block';
+        this.recordingTimer = setInterval(() => {
+          const elapsed = Date.now() - this.recordingStartTime;
+          const seconds = Math.floor(elapsed / 1000);
+          const minutes = Math.floor(seconds / 60);
+          const remainingSeconds = seconds % 60;
+          this.recordingTime.textContent = 
+            `录制时间: ${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
+        }, 1000);
+      }
+      
+      stopRecordingTimer() {
+        if (this.recordingTimer) {
+          clearInterval(this.recordingTimer);
+          this.recordingTimer = null;
+        }
+        this.recordingTime.style.display = 'none';
+      }
+      
+      onRecordingComplete() {
+        const blob = new Blob(this.recordedChunks, { type: 'video/webm' });
+        this.recordedBlob = blob;
+        
+        this.analyzeBtn.disabled = false;
+        this.downloadBtn.disabled = false;
+        
+        // 显示录制的视频大小
+        const sizeInMB = (blob.size / (1024 * 1024)).toFixed(2);
+        this.updateStatus(`录制完成 (${sizeInMB} MB)，可以进行分析或下载`, 'ready');
+      }
+      
+      async analyzeVideo() {
+        if (!this.recordedBlob) {
+          alert('没有录制的视频');
+          return;
+        }
+        
+        this.updateStatus('正在分析视频...', 'processing');
+        this.analyzeBtn.disabled = true;
+        this.result.innerHTML = '<div style="text-align: center;">🔄 正在处理视频，请稍候...</div>';
+        
+        try {
+          // 将Blob转换为Base64
+          const base64Data = await this.blobToBase64(this.recordedBlob);
+          
+          const response = await fetch('http://localhost:3100/api/video/analyze-base64', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              videoData: base64Data,
+              filename: `recorded_${Date.now()}.webm`
+            })
+          });
+          
+          if (!response.ok) {
+            throw new Error(`服务器错误: ${response.status}`);
+          }
+          
+          const data = await response.json();
+          
+          if (data.success) {
+            this.displayResults(data);
+            this.updateStatus('分析完成', 'ready');
+          } else {
+            throw new Error(data.error || '分析失败');
+          }
+          
+        } catch (error) {
+          console.error('分析失败:', error);
+          this.result.innerHTML = `<div style="color: red;">❌ 分析失败: ${this.escapeHtml(error.message)}</div>`;
+          this.updateStatus('分析失败', 'error');
+        } finally {
+          this.analyzeBtn.disabled = false;
+        }
+      }
+      
+      blobToBase64(blob) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+      }
+      
+      displayResults(data) {
+        const { emotionTimeline, asrText, processedFrames } = data;
+        
+        const emotionHtml = emotionTimeline.map(item => 
+          `<div class="emotion-item">
+            <strong>帧 ${this.escapeHtml(item.frame)}:</strong> 
+            ${this.formatEmotion(item.emotion)}
+          </div>`
+        ).join('');
+        
+        this.result.innerHTML = `
+          <h3>📊 分析结果</h3>
+          <div style="margin-bottom: 20px;">
+            <h4>🎤 语音识别结果:</h4>
+            <div style="background: white; padding: 15px; border-radius: 5px; border: 1px solid #ddd;">
+              <pre style="margin: 0; white-space: pre-wrap; word-wrap: break-word;">${this.escapeHtml(asrText || '未识别到语音内容')}</pre>
+            </div>
+          </div>
+          
+          <div>
+            <h4>😊 表情变化分析 (共处理 ${processedFrames} 帧):</h4>
+            <div style="max-height: 400px; overflow-y: auto;">
+              ${emotionHtml || '<div>未检测到表情数据</div>'}
+            </div>
+          </div>
+        `;
+      }
+      
+      formatEmotion(emotion) {
+        if (emotion.error) {
+          return `<span style="color: red;">${this.escapeHtml(emotion.error)}</span>`;
+        }
+        return `<code>${this.escapeHtml(JSON.stringify(emotion, null, 2))}</code>`;
+      }
+      
+      downloadVideo() {
+        if (!this.recordedBlob) {
+          alert('没有录制的视频');
+          return;
+        }
+        
+        const url = URL.createObjectURL(this.recordedBlob);
+        const a = document.createElement('a');
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        a.href = url;
+        a.download = `recorded_video_${timestamp}.webm`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+      
+      updateStatus(message, type = '') {
+        this.status.textContent = message;
+        this.status.className = `status ${type}`;
+      }
+      
+      escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+      }
+      
+      // 清理资源
+      destroy() {
+        this.stopRecordingTimer();
+        if (this.stream) {
+          this.stream.getTracks().forEach(track => track.stop());
+        }
+        if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+          this.mediaRecorder.stop();
+        }
+      }
+    }
+    
+    // 页面加载完成后初始化
+    let recorder;
+    window.addEventListener('load', () => {
+      recorder = new VideoRecorder();
+    });
+    
+    // 页面卸载时清理资源
+    window.addEventListener('beforeunload', () => {
+      if (recorder) {
+        recorder.destroy();
+      }
+    });
   </script>
 </body>
 </html>
