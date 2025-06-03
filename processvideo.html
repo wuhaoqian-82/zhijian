@@ -285,6 +285,18 @@
       margin: 5px 0;
       padding-left: 20px;
     }
+    .performance-monitor {
+      position: fixed;
+      bottom: 10px;
+      right: 10px;
+      background: rgba(0,0,0,0.8);
+      color: white;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-family: monospace;
+      display: none;
+    }
     @media (max-width: 768px) {
       .container {
         padding: 15px;
@@ -332,6 +344,7 @@
   </div>
 
   <div id="serverStatus" class="server-status checking">服务器: 检测中...</div>
+  <div id="performanceMonitor" class="performance-monitor"></div>
 
   <script>
     class VideoRecorder {
@@ -345,6 +358,18 @@
         this.selectedMimeType = null;
         this.serverOnline = false;
         this.recordingQuality = 'high';
+        this.requestCount = 0;
+        this.maxRequestsPerMinute = 10;
+        this.requestTimestamps = [];
+        
+        // 性能监控
+        this.performanceMonitor = {
+          enabled: localStorage.getItem('perfMonitor') === 'true',
+          startTime: performance.now(),
+          memory: { peak: 0, current: 0 },
+          timers: new Set(),
+          intervals: new Set()
+        };
         
         // DOM 元素
         this.preview = document.getElementById('preview');
@@ -361,11 +386,107 @@
         this.progressText = document.getElementById('progressText');
         this.serverStatus = document.getElementById('serverStatus');
         this.recordingTips = document.getElementById('recordingTips');
+        this.performanceMonitorEl = document.getElementById('performanceMonitor');
         
         // 配置
         this.serverUrl = this.detectServerUrl();
         
         this.init();
+        this.setupResourceCleanup();
+        this.startPerformanceMonitoring();
+      }
+      
+      // 改进的资源清理
+      setupResourceCleanup() {
+        // 页面卸载时清理资源
+        window.addEventListener('beforeunload', () => {
+          this.cleanup();
+        });
+        
+        // 页面隐藏时暂停录制
+        document.addEventListener('visibilitychange', () => {
+          if (document.hidden && this.mediaRecorder && this.mediaRecorder.state === 'recording') {
+            console.warn('页面隐藏，自动停止录制');
+            this.stopRecording();
+          }
+        });
+        
+        // 监听内存使用
+        if ('memory' in performance) {
+          setInterval(() => {
+            const memInfo = performance.memory;
+            this.performanceMonitor.memory.current = memInfo.usedJSHeapSize;
+            this.performanceMonitor.memory.peak = Math.max(
+              this.performanceMonitor.memory.peak, 
+              memInfo.usedJSHeapSize
+            );
+          }, 5000);
+        }
+      }
+      
+      // 性能监控
+      startPerformanceMonitoring() {
+        if (!this.performanceMonitor.enabled) return;
+        
+        this.performanceMonitorEl.style.display = 'block';
+        
+        const updateMonitor = () => {
+          const uptime = ((performance.now() - this.performanceMonitor.startTime) / 1000).toFixed(1);
+          const memoryMB = this.performanceMonitor.memory.current ? 
+            (this.performanceMonitor.memory.current / 1024 / 1024).toFixed(1) : 'N/A';
+          const peakMemoryMB = this.performanceMonitor.memory.peak ? 
+            (this.performanceMonitor.memory.peak / 1024 / 1024).toFixed(1) : 'N/A';
+          
+          this.performanceMonitorEl.innerHTML = `
+            运行时间: ${uptime}s | 内存: ${memoryMB}MB | 峰值: ${peakMemoryMB}MB<br>
+            定时器: ${this.performanceMonitor.timers.size} | 请求: ${this.requestCount}
+          `;
+        };
+        
+        const monitorInterval = setInterval(updateMonitor, 1000);
+        this.performanceMonitor.intervals.add(monitorInterval);
+      }
+      
+      // 请求速率限制
+      checkRateLimit() {
+        const now = Date.now();
+        const oneMinuteAgo = now - 60000;
+        
+        // 清理过期的时间戳
+        this.requestTimestamps = this.requestTimestamps.filter(ts => ts > oneMinuteAgo);
+        
+        if (this.requestTimestamps.length >= this.maxRequestsPerMinute) {
+          throw new Error(`请求过于频繁，请等待${Math.ceil((this.requestTimestamps[0] + 60000 - now) / 1000)}秒后重试`);
+        }
+        
+        this.requestTimestamps.push(now);
+        this.requestCount++;
+      }
+      
+      // 改进的定时器管理
+      safeSetTimeout(callback, delay) {
+        const timeoutId = setTimeout(() => {
+          this.performanceMonitor.timers.delete(timeoutId);
+          callback();
+        }, delay);
+        this.performanceMonitor.timers.add(timeoutId);
+        return timeoutId;
+      }
+      
+      safeSetInterval(callback, interval) {
+        const intervalId = setInterval(callback, interval);
+        this.performanceMonitor.intervals.add(intervalId);
+        return intervalId;
+      }
+      
+      safeClearTimeout(timeoutId) {
+        clearTimeout(timeoutId);
+        this.performanceMonitor.timers.delete(timeoutId);
+      }
+      
+      safeClearInterval(intervalId) {
+        clearInterval(intervalId);
+        this.performanceMonitor.intervals.delete(intervalId);
       }
       
       detectServerUrl() {
@@ -381,6 +502,7 @@
       
       async checkBrowserCompatibility() {
         const issues = [];
+        const warnings = [];
         
         if (!navigator.mediaDevices) {
           issues.push('不支持媒体设备API');
@@ -396,6 +518,12 @@
         
         if (!window.fetch) {
           issues.push('不支持Fetch API');
+          warnings.push('建议升级浏览器以获得更好的兼容性');
+        }
+        
+        // 检查WebRTC支持
+        if (!window.RTCPeerConnection) {
+          warnings.push('WebRTC支持有限，某些功能可能受影响');
         }
         
         // 检查支持的视频格式
@@ -404,6 +532,7 @@
             { type: 'video/webm;codecs=vp9,opus', quality: 'high' },
             { type: 'video/webm;codecs=vp8,opus', quality: 'medium' }, 
             { type: 'video/webm', quality: 'medium' },
+            { type: 'video/mp4;codecs=h264,aac', quality: 'high' },
             { type: 'video/mp4', quality: 'low' }
           ];
           
@@ -418,37 +547,47 @@
           } else {
             this.selectedMimeType = this.supportedMimeTypes[0].type;
             this.recordingQuality = this.supportedMimeTypes[0].quality;
+            
+            // 跳过录制测试，避免MediaRecorder错误
+            console.log('跳过录制兼容性测试，使用基础格式检查');
           }
         }
         
-        return issues;
+        return { issues, warnings };
       }
       
-      showCompatibilityWarning(issues) {
+      showCompatibilityWarning(issues, warnings = []) {
         const warningDiv = document.createElement('div');
         warningDiv.className = 'compatibility-warning';
-        warningDiv.innerHTML = `
-          <h4>⚠️ 浏览器兼容性警告</h4>
-          <p>检测到以下问题：</p>
-          <ul>
-            ${issues.map(issue => `<li>${this.escapeHtml(issue)}</li>`).join('')}
-          </ul>
-          <p>建议使用最新版本的Chrome、Firefox或Edge浏览器。</p>
-        `;
+        
+        let content = '';
+        if (issues.length > 0) {
+          content += `
+            <h4>⚠️ 浏览器兼容性问题</h4>
+            <p>检测到以下严重问题：</p>
+            <ul>
+              ${issues.map(issue => `<li>${this.escapeHtml(issue)}</li>`).join('')}
+            </ul>
+          `;
+        }
+        
+        if (warnings.length > 0) {
+          content += `
+            <h4>💡 兼容性提醒</h4>
+            <ul>
+              ${warnings.map(warning => `<li>${this.escapeHtml(warning)}</li>`).join('')}
+            </ul>
+          `;
+        }
+        
+        content += `<p>建议使用最新版本的Chrome、Firefox或Edge浏览器。</p>`;
+        warningDiv.innerHTML = content;
         
         document.querySelector('.container').insertBefore(warningDiv, document.querySelector('.video-container'));
       }
       
       async init() {
         try {
-          // 检查浏览器兼容性
-          const compatibilityIssues = await this.checkBrowserCompatibility();
-          if (compatibilityIssues.length > 0) {
-            this.showCompatibilityWarning(compatibilityIssues);
-            this.updateStatus('浏览器兼容性存在问题，功能可能受限', 'error');
-            return;
-          }
-          
           // 请求摄像头和麦克风权限
           this.updateStatus('正在请求摄像头和麦克风权限...', 'processing');
           
@@ -468,6 +607,23 @@
           
           this.stream = await navigator.mediaDevices.getUserMedia(constraints);
           this.preview.srcObject = this.stream;
+          
+          // 等待视频流准备就绪
+          await new Promise((resolve) => {
+            this.preview.onloadedmetadata = () => {
+              resolve();
+            };
+          });
+          
+          // 检查浏览器兼容性（在获取媒体流之后）
+          const compatibility = await this.checkBrowserCompatibility();
+          if (compatibility.issues.length > 0) {
+            this.showCompatibilityWarning(compatibility.issues, compatibility.warnings);
+            this.updateStatus('浏览器兼容性存在问题，功能可能受限', 'error');
+            return;
+          } else if (compatibility.warnings.length > 0) {
+            this.showCompatibilityWarning([], compatibility.warnings);
+          }
           
           // 获取实际的视频流信息
           const videoTrack = this.stream.getVideoTracks()[0];
@@ -491,22 +647,71 @@
           
         } catch (error) {
           console.error('摄像头初始化失败:', error);
-          let errorMessage = '摄像头访问失败: ';
-          
-          if (error.name === 'NotAllowedError') {
-            errorMessage += '用户拒绝了摄像头权限，请在浏览器设置中允许摄像头访问';
-          } else if (error.name === 'NotFoundError') {
-            errorMessage += '未找到摄像头设备，请确认摄像头已连接';
-          } else if (error.name === 'NotReadableError') {
-            errorMessage += '摄像头被其他应用占用，请关闭其他使用摄像头的应用';
-          } else if (error.name === 'OverconstrainedError') {
-            errorMessage += '摄像头不支持所请求的配置，尝试降低分辨率';
-          } else {
-            errorMessage += error.message;
-          }
-          
-          this.updateStatus(errorMessage, 'error');
+          this.handleCameraError(error);
         }
+      }
+      
+      handleCameraError(error) {
+        let errorMessage = '摄像头访问失败: ';
+        let suggestions = [];
+        
+        if (error.name === 'NotAllowedError') {
+          errorMessage += '用户拒绝了摄像头权限';
+          suggestions = [
+            '点击地址栏的摄像头图标并允许访问',
+            '检查浏览器设置中的媒体权限',
+            '刷新页面并重新授权'
+          ];
+        } else if (error.name === 'NotFoundError') {
+          errorMessage += '未找到摄像头设备';
+          suggestions = [
+            '确认摄像头已正确连接',
+            '检查设备管理器中的摄像头状态',
+            '尝试重新连接摄像头'
+          ];
+        } else if (error.name === 'NotReadableError') {
+          errorMessage += '摄像头被其他应用占用';
+          suggestions = [
+            '关闭其他使用摄像头的应用程序',
+            '重启浏览器',
+            '重启计算机'
+          ];
+        } else if (error.name === 'OverconstrainedError') {
+          errorMessage += '摄像头不支持所请求的配置';
+          suggestions = [
+            '降低视频质量要求',
+            '检查摄像头规格',
+            '尝试使用其他摄像头'
+          ];
+        } else {
+          errorMessage += error.message;
+          suggestions = [
+            '刷新页面重试',
+            '检查网络连接',
+            '联系技术支持'
+          ];
+        }
+        
+        this.displayDetailedError(errorMessage, suggestions);
+      }
+      
+      displayDetailedError(message, suggestions = []) {
+        const errorHtml = `
+          <div class="error-details">
+            <h4>❌ ${message}</h4>
+            ${suggestions.length > 0 ? `
+              <div class="suggestions">
+                <strong>💡 建议解决方案：</strong>
+                <ul>
+                  ${suggestions.map(s => `<li>${this.escapeHtml(s)}</li>`).join('')}
+                </ul>
+              </div>
+            ` : ''}
+          </div>
+        `;
+        
+        this.result.innerHTML = errorHtml;
+        this.updateStatus('初始化失败', 'error');
       }
       
       async testServerConnection() {
@@ -515,14 +720,14 @@
           this.serverStatus.className = 'server-status checking';
           
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 5000);
+          const timeoutId = this.safeSetTimeout(() => controller.abort(), 5000);
           
           const response = await fetch(`${this.serverUrl}/health`, {
             method: 'GET',
             signal: controller.signal
           });
           
-          clearTimeout(timeoutId);
+          this.safeClearTimeout(timeoutId);
           
           if (response.ok) {
             const data = await response.json();
@@ -547,25 +752,51 @@
         this.analyzeBtn.addEventListener('click', () => this.analyzeVideo());
         this.downloadBtn.addEventListener('click', () => this.downloadVideo());
         
-        // 监听页面可见性变化
-        document.addEventListener('visibilitychange', () => {
-          if (document.hidden && this.mediaRecorder && this.mediaRecorder.state === 'recording') {
-            console.warn('页面隐藏时录制可能受影响');
-          }
-        });
-        
         // 定期检查服务器状态
-        setInterval(() => {
+        const serverCheckInterval = this.safeSetInterval(() => {
           this.testServerConnection();
         }, 30000);
+        
+        // 启用性能监控的快捷键
+        document.addEventListener('keydown', (e) => {
+          if (e.ctrlKey && e.shiftKey && e.key === 'P') {
+            this.togglePerformanceMonitor();
+          }
+        });
+      }
+      
+      togglePerformanceMonitor() {
+        this.performanceMonitor.enabled = !this.performanceMonitor.enabled;
+        localStorage.setItem('perfMonitor', this.performanceMonitor.enabled);
+        
+        if (this.performanceMonitor.enabled) {
+          this.startPerformanceMonitoring();
+        } else {
+          this.performanceMonitorEl.style.display = 'none';
+        }
       }
       
       async startRecording() {
         try {
+          // 检查速率限制
+          this.checkRateLimit();
+          
           this.recordedChunks = [];
           
           if (!this.selectedMimeType) {
             throw new Error('无可用的录制格式');
+          }
+          
+          if (!this.stream || !this.stream.active) {
+            throw new Error('媒体流未准备就绪');
+          }
+          
+          // 验证媒体流是否有有效轨道
+          const videoTracks = this.stream.getVideoTracks();
+          const audioTracks = this.stream.getAudioTracks();
+          
+          if (videoTracks.length === 0 && audioTracks.length === 0) {
+            throw new Error('没有可用的音频或视频轨道');
           }
           
           // 优化录制参数
@@ -575,13 +806,13 @@
           
           // 根据格式调整比特率
           if (this.selectedMimeType.includes('vp9')) {
-            options.videoBitsPerSecond = 1500000; // VP9更高效
+            options.videoBitsPerSecond = 1500000;
             options.audioBitsPerSecond = 128000;
           } else if (this.selectedMimeType.includes('vp8')) {
             options.videoBitsPerSecond = 2000000;
             options.audioBitsPerSecond = 128000;
           } else if (this.selectedMimeType.includes('mp4')) {
-            options.videoBitsPerSecond = 2500000; // MP4需要更高比特率
+            options.videoBitsPerSecond = 2500000;
             options.audioBitsPerSecond = 128000;
           } else {
             options.videoBitsPerSecond = 2000000;
@@ -607,7 +838,7 @@
             this.resetRecordingState();
           };
           
-          this.mediaRecorder.start(250); // 更频繁收集数据，提高稳定性
+          this.mediaRecorder.start(250);
           
           this.recordingStartTime = Date.now();
           this.startRecordingTimer();
@@ -652,7 +883,7 @@
       
       startRecordingTimer() {
         this.recordingTime.style.display = 'block';
-        this.recordingTimer = setInterval(() => {
+        this.recordingTimer = this.safeSetInterval(() => {
           const elapsed = Date.now() - this.recordingStartTime;
           const seconds = Math.floor(elapsed / 1000);
           const minutes = Math.floor(seconds / 60);
@@ -664,7 +895,7 @@
       
       stopRecordingTimer() {
         if (this.recordingTimer) {
-          clearInterval(this.recordingTimer);
+          this.safeClearInterval(this.recordingTimer);
           this.recordingTimer = null;
         }
         this.recordingTime.style.display = 'none';
@@ -734,6 +965,14 @@
           return;
         }
         
+        try {
+          // 检查速率限制
+          this.checkRateLimit();
+        } catch (error) {
+          this.updateStatus(error.message, 'error');
+          return;
+        }
+        
         this.updateStatus('正在分析视频，请稍候...', 'processing');
         this.analyzeBtn.disabled = true;
         this.showProgress(0, '准备发送视频数据...');
@@ -762,7 +1001,7 @@
           });
           
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 120000); // 2分钟超时
+          const timeoutId = this.safeSetTimeout(() => controller.abort(), 120000); // 2分钟超时
           
           const response = await fetch(`${this.serverUrl}/api/video/analyze-base64`, {
             method: 'POST',
@@ -773,7 +1012,7 @@
             signal: controller.signal
           });
           
-          clearTimeout(timeoutId);
+          this.safeClearTimeout(timeoutId);
           this.showProgress(60, '服务器正在处理...');
           
           const data = await response.json();
@@ -840,6 +1079,12 @@
             '重启服务器',
             '尝试录制不同格式的视频'
           ];
+        } else if (error.message.includes('请求过于频繁')) {
+          suggestions = [
+            '等待一段时间后重试',
+            '避免频繁点击分析按钮',
+            '联系管理员调整速率限制'
+          ];
         }
         
         this.result.innerHTML = `
@@ -861,6 +1106,7 @@
               服务器地址: ${this.serverUrl}<br>
               录制格式: ${this.selectedMimeType}<br>
               视频大小: ${this.recordedBlob ? (this.recordedBlob.size / 1024 / 1024).toFixed(2) + ' MB' : '未知'}<br>
+              请求次数: ${this.requestCount}<br>
               时间戳: ${new Date().toISOString()}
             </div>
           </div>
@@ -999,71 +1245,89 @@
           const a = document.createElement('a');
           const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
           a.href = url;
-          a.download = `recorded_video_${timestamp}.webm`;
+          a.download = `录制视频_${timestamp}.webm`;
           document.body.appendChild(a);
           a.click();
           document.body.removeChild(a);
-          URL.revokeObjectURL(url);
           
-          this.updateStatus('视频下载完成', 'ready');
+          // 延迟释放URL对象
+          this.safeSetTimeout(() => {
+            URL.revokeObjectURL(url);
+          }, 1000);
+          
+          this.updateStatus('视频下载已开始', 'ready');
         } catch (error) {
           console.error('下载失败:', error);
           this.updateStatus('下载失败: ' + error.message, 'error');
         }
       }
       
-      updateStatus(message, type = '') {
+      // 完整的资源清理
+      cleanup() {
+        console.log('开始清理资源...');
+        
+        // 清理媒体流
+        if (this.stream) {
+          this.stream.getTracks().forEach(track => {
+            track.stop();
+            console.log('停止媒体轨道:', track.kind);
+          });
+          this.stream = null;
+        }
+        
+        // 清理媒体录制器
+        if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
+          this.mediaRecorder.stop();
+        }
+        this.mediaRecorder = null;
+        
+        // 清理所有定时器
+        this.performanceMonitor.timers.forEach(timerId => {
+          clearTimeout(timerId);
+        });
+        this.performanceMonitor.timers.clear();
+        
+        this.performanceMonitor.intervals.forEach(intervalId => {
+          clearInterval(intervalId);
+        });
+        this.performanceMonitor.intervals.clear();
+        
+        // 清理Blob URL
+        if (this.recordedBlob) {
+          const url = URL.createObjectURL(this.recordedBlob);
+          URL.revokeObjectURL(url);
+          this.recordedBlob = null;
+        }
+        
+        console.log('资源清理完成');
+      }
+      
+      updateStatus(message, type = 'ready') {
         this.status.textContent = message;
         this.status.className = `status ${type}`;
+        console.log(`状态更新: ${message} (${type})`);
       }
       
       escapeHtml(text) {
-        if (typeof text !== 'string') {
-          text = String(text);
-        }
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
       }
-      
-      // 清理资源
-      destroy() {
-        this.stopRecordingTimer();
-        if (this.stream) {
-          this.stream.getTracks().forEach(track => track.stop());
-        }
-        if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
-          this.mediaRecorder.stop();
-        }
-      }
     }
-    
-    // 页面加载完成后初始化
-    let recorder;
-    window.addEventListener('DOMContentLoaded', () => {
-      try {
-        recorder = new VideoRecorder();
-      } catch (error) {
-        console.error('初始化失败:', error);
-        document.getElementById('status').textContent = '初始化失败: ' + error.message;
-        document.getElementById('status').className = 'status error';
-      }
-    });
-    
-    // 页面卸载时清理资源
-    window.addEventListener('beforeunload', () => {
-      if (recorder) {
-        recorder.destroy();
-      }
-    });
     
     // 全局错误处理
     window.addEventListener('error', (event) => {
-      console.error('页面错误:', event.error);
+      console.error('全局错误:', event.error);
     });
     
     window.addEventListener('unhandledrejection', (event) => {
-      console.error('未处理的Promise错误:', event.reason);
+      console.error('未处理的Promise拒绝:', event.reason);
+    });
+    
+    // 启动应用
+    document.addEventListener('DOMContentLoaded', () => {
+      console.log('页面加载完成，初始化VideoRecorder...');
+      window.videoRecorder = new VideoRecorder();
     });
   </script>
 </body>
