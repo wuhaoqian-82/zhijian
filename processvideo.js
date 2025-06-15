@@ -1,5 +1,4 @@
 const express = require('express');
-const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -409,12 +408,21 @@ class ErrorHandler {
       return { status: 403, code: 'ACCESS_DENIED', message: '文件访问被拒绝' };
     }
     
-    if (error.message.includes('timeout')) {
+    if (error.message.includes('timeout') || error.code === 'ECONNABORTED') {
       return { status: 408, code: 'REQUEST_TIMEOUT', message: '请求超时' };
     }
     
     if (error.message.includes('ffmpeg')) {
       return { status: 500, code: 'VIDEO_PROCESSING_ERROR', message: '视频处理失败' };
+    }
+    
+    // URL相关错误
+    if (error.message.includes('URL') || error.message.includes('下载')) {
+      return { status: 400, code: 'VIDEO_DOWNLOAD_ERROR', message: error.message };
+    }
+    
+    if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
+      return { status: 502, code: 'EXTERNAL_SERVICE_ERROR', message: '无法连接到视频源' };
     }
     
     // 默认服务器错误
@@ -439,6 +447,8 @@ const FACE_SECRET = process.env.FACE_SECRET || "7a716e2b437bbf31dd9f6ebc07978fe1
 // 请求超时配置
 const REQUEST_TIMEOUT = 30000; // 30秒
 const WS_TIMEOUT = 30000; // WebSocket超时
+const DOWNLOAD_TIMEOUT = process.env.DOWNLOAD_TIMEOUT || 60000; // 60秒下载超时
+const MAX_DOWNLOAD_SIZE = process.env.MAX_DOWNLOAD_SIZE || 100 * 1024 * 1024; // 100MB
 
 // ========== Express配置 ==========
 const app = express();
@@ -477,57 +487,9 @@ const analyzeLimit = rateLimit({
   }
 });
 
-// 文件存储配置
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadDir);
-  },
-  filename: function (req, file, cb) {
-    const ext = path.extname(file.originalname) || '.webm';
-    const basename = path.basename(file.originalname, ext) || 'recorded_video';
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    const filename = basename + '-' + uniqueSuffix + ext;
-    cb(null, filename);
-  }
-});
-
-// 改进的文件上传配置
-const upload = multer({ 
-  storage,
-  limits: {
-    fileSize: 100 * 1024 * 1024, // 100MB 限制
-    files: 1, // 只允许一个文件
-    fieldSize: 10 * 1024 * 1024 // 10MB字段大小限制
-  },
-  fileFilter: (req, file, cb) => {
-    const allowedMimes = [
-      'video/mp4', 
-      'video/webm',
-      'video/ogg',
-      'video/avi', 
-      'video/mov',
-      'video/quicktime'
-    ];
-    
-    if (allowedMimes.includes(file.mimetype)) {
-      // 额外检查文件扩展名
-      const ext = path.extname(file.originalname).toLowerCase();
-      const allowedExts = ['.mp4', '.webm', '.ogg', '.avi', '.mov'];
-      
-      if (allowedExts.includes(ext)) {
-        cb(null, true);
-      } else {
-        cb(new Error('文件扩展名不支持'), false);
-      }
-    } else {
-      cb(new Error('不支持的文件格式。支持的格式：MP4, WebM, OGG, AVI, MOV'), false);
-    }
-  }
-});
-
 // 中间件配置
 app.use(express.json({ 
-  limit: '50mb',
+  limit: '10mb', // 降低JSON限制，因为不再需要处理大的Base64数据
   verify: (req, res, buf) => {
     // 验证JSON格式
     try {
@@ -539,8 +501,6 @@ app.use(express.json({
     }
   }
 }));
-
-app.use(express.raw({ type: 'video/*', limit: '100mb' }));
 
 // 请求日志中间件
 app.use((req, res, next) => {
@@ -617,7 +577,145 @@ app.use(limiter);
 // ========== ffmpeg配置 ==========
 ffmpeg.setFfmpegPath(ffmpegPath);
 
-// ========== 改进的工具函数 ==========
+// ========== 工具函数 ==========
+
+// 从URL获取视频扩展名
+function getVideoExtensionFromUrl(url) {
+  try {
+    const parsedUrl = new URL(url);
+    const pathname = parsedUrl.pathname;
+    const ext = path.extname(pathname).toLowerCase();
+    const allowedExts = ['.mp4', '.webm', '.ogg', '.avi', '.mov'];
+    return allowedExts.includes(ext) ? ext : null;
+  } catch {
+    return null;
+  }
+}
+
+// 从Content-Type获取扩展名
+function getExtensionFromContentType(contentType) {
+  if (!contentType) return null;
+  
+  const typeMap = {
+    'video/mp4': '.mp4',
+    'video/webm': '.webm',
+    'video/ogg': '.ogg',
+    'video/avi': '.avi',
+    'video/mov': '.mov',
+    'video/quicktime': '.mov'
+  };
+  
+  for (const [type, ext] of Object.entries(typeMap)) {
+    if (contentType.includes(type)) {
+      return ext;
+    }
+  }
+  return null;
+}
+
+// 从URL下载视频文件
+async function downloadVideoFromUrl(videoUrl, filename, requestId) {
+  try {
+    logger.info('开始下载视频文件', { videoUrl, requestId });
+    
+    const response = await axios({
+      method: 'GET',
+      url: videoUrl,
+      responseType: 'stream',
+      timeout: DOWNLOAD_TIMEOUT,
+      maxContentLength: MAX_DOWNLOAD_SIZE,
+      headers: {
+        'User-Agent': 'VideoAnalysisServer/1.0',
+        'Accept': 'video/*,*/*',
+      }
+    });
+    
+    // 验证Content-Type
+    const contentType = response.headers['content-type'];
+    const allowedTypes = [
+      'video/mp4', 'video/webm', 'video/ogg', 
+      'video/avi', 'video/mov', 'video/quicktime',
+      'application/octet-stream' // 某些服务器可能返回这个
+    ];
+    
+    if (contentType && !allowedTypes.some(type => contentType.includes(type))) {
+      throw new Error(`不支持的视频格式: ${contentType}`);
+    }
+    
+    // 检查文件大小
+    const contentLength = response.headers['content-length'];
+    if (contentLength && parseInt(contentLength) > MAX_DOWNLOAD_SIZE) {
+      throw new Error(`视频文件过大: ${(parseInt(contentLength) / 1024 / 1024).toFixed(2)}MB，超过100MB限制`);
+    }
+    
+    // 生成临时文件路径
+    const ext = getVideoExtensionFromUrl(videoUrl) || getExtensionFromContentType(contentType) || '.mp4';
+    const safeFilename = `url_video_${Date.now()}_${Math.floor(Math.random()*10000)}_${requestId}${ext}`;
+    const tempVideoPath = path.join(uploadDir, safeFilename);
+    
+    // 下载文件
+    const writer = fs.createWriteStream(tempVideoPath);
+    let downloadedSize = 0;
+    
+    response.data.on('data', (chunk) => {
+      downloadedSize += chunk.length;
+      if (downloadedSize > MAX_DOWNLOAD_SIZE) {
+        writer.destroy();
+        if (fs.existsSync(tempVideoPath)) {
+          fs.unlinkSync(tempVideoPath);
+        }
+        throw new Error('下载过程中检测到文件过大');
+      }
+    });
+    
+    response.data.pipe(writer);
+    
+    return new Promise((resolve, reject) => {
+      writer.on('finish', () => {
+        // 验证下载的文件
+        const stats = fs.statSync(tempVideoPath);
+        if (stats.size === 0) {
+          fs.unlinkSync(tempVideoPath);
+          reject(new Error('下载的视频文件为空'));
+          return;
+        }
+        
+        resourceManager.registerTempFile(tempVideoPath);
+        logger.info('视频文件下载完成', { 
+          path: tempVideoPath, 
+          size: stats.size,
+          sizeMB: (stats.size / 1024 / 1024).toFixed(2),
+          requestId 
+        });
+        resolve(tempVideoPath);
+      });
+      
+      writer.on('error', (error) => {
+        if (fs.existsSync(tempVideoPath)) {
+          fs.unlinkSync(tempVideoPath);
+        }
+        reject(new Error(`文件写入失败: ${error.message}`));
+      });
+      
+      response.data.on('error', (error) => {
+        writer.destroy();
+        if (fs.existsSync(tempVideoPath)) {
+          fs.unlinkSync(tempVideoPath);
+        }
+        reject(new Error(`视频下载失败: ${error.message}`));
+      });
+    });
+    
+  } catch (error) {
+    if (error.response) {
+      throw new Error(`下载失败: HTTP ${error.response.status} - ${error.response.statusText}`);
+    } else if (error.request) {
+      throw new Error('网络请求失败，请检查URL是否可访问');
+    } else {
+      throw new Error(`下载视频失败: ${error.message}`);
+    }
+  }
+}
 
 // 流式文件验证
 function validateVideoFileStream(videoPath) {
@@ -1188,213 +1286,7 @@ async function analyzeImageEmotion(imgPath) {
   }
 }
 
-// ========== 改进的API路由 ==========
-
-// 健康检查接口
-app.get('/health', (req, res) => {
-  const health = performanceMonitor.getHealthStatus();
-  const resourceStats = resourceManager.getStats();
-  
-  res.status(health.status === 'healthy' ? 200 : 503).json({ 
-    status: health.status,
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    environment: {
-      nodeVersion: process.version,
-      platform: process.platform,
-      arch: process.arch,
-      memory: {
-        used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
-        total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
-      }
-    },
-    performance: health.metrics,
-    resources: resourceStats
-  });
-});
-
-// 服务器信息接口
-app.get('/api/info', (req, res) => {
-  res.json({
-    name: 'Video Analysis Server',
-    version: '3.0.0',
-    timestamp: new Date().toISOString(),
-    capabilities: {
-      videoFormats: ['mp4', 'webm', 'ogg', 'avi', 'mov'],
-      maxFileSize: '100MB',
-      features: [
-        'emotion-analysis', 
-        'speech-recognition', 
-        'frame-extraction', 
-        'video-validation',
-        'rate-limiting',
-        'performance-monitoring',
-        'resource-management'
-      ]
-    },
-    limits: {
-      requestsPerWindow: '100/15min',
-      analysisRequests: '10/min',
-      maxVideoSize: '100MB',
-      maxProcessingTime: '120s'
-    }
-  });
-});
-
-// 性能指标接口
-app.get('/api/metrics', (req, res) => {
-  // 简单的认证检查
-  const authToken = req.headers.authorization;
-  if (process.env.METRICS_TOKEN && authToken !== `Bearer ${process.env.METRICS_TOKEN}`) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  
-  const metrics = performanceMonitor.getMetrics();
-  const resourceStats = resourceManager.getStats();
-  
-  res.json({
-    performance: metrics,
-    resources: resourceStats,
-    system: {
-      cpuUsage: process.cpuUsage(),
-      memoryUsage: process.memoryUsage(),
-      uptime: process.uptime(),
-      pid: process.pid
-    }
-  });
-});
-
-// 支持文件上传的原有接口（兼容性保留）
-app.post('/api/video/analyze', analyzeLimit, upload.single('file'), async (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ 
-      success: false,
-      error: '未收到视频文件',
-      code: 'MISSING_FILE',
-      requestId: req.requestId
-    });
-  }
-  
-  await processVideoWithLogging(req.file.path, res, req.requestId);
-});
-
-// 改进的Base64视频数据接口
-app.post('/api/video/analyze-base64', analyzeLimit, async (req, res) => {
-  let tempVideoPath = null;
-  
-  try {
-    const { videoData, filename = 'recorded_video.webm' } = req.body;
-    
-    if (!videoData) {
-      return res.status(400).json({ 
-        success: false,
-        error: '未收到视频数据',
-        code: 'MISSING_VIDEO_DATA',
-        requestId: req.requestId
-      });
-    }
-    
-    // 验证和清理base64数据
-    let base64Data;
-    try {
-      // 移除可能的data URL前缀
-      base64Data = videoData.replace(/^data:video\/[^;]+;base64,/, '');
-      
-      // 验证base64格式
-      if (!/^[A-Za-z0-9+/]*={0,2}$/.test(base64Data)) {
-        throw new Error('Invalid base64 format');
-      }
-    } catch (error) {
-      return res.status(400).json({
-        success: false,
-        error: '视频数据格式错误',
-        code: 'INVALID_VIDEO_FORMAT',
-        requestId: req.requestId
-      });
-    }
-    
-    let videoBuffer;
-    try {
-      videoBuffer = Buffer.from(base64Data, 'base64');
-    } catch (error) {
-      return res.status(400).json({
-        success: false,
-        error: 'Base64解码失败',
-        code: 'BASE64_DECODE_ERROR',
-        requestId: req.requestId
-      });
-    }
-    
-    if (videoBuffer.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: '视频数据为空',
-        code: 'EMPTY_VIDEO_DATA',
-        requestId: req.requestId
-      });
-    }
-    
-    if (videoBuffer.length > 100 * 1024 * 1024) {
-      return res.status(413).json({
-        success: false,
-        error: '视频数据过大，超过100MB限制',
-        code: 'FILE_TOO_LARGE',
-        requestId: req.requestId
-      });
-    }
-    
-    // 验证视频数据的基本结构
-    const isValidWebM = videoBuffer.slice(0, 4).toString('hex') === '1a45dfa3';
-    const isValidMP4 = videoBuffer.slice(4, 8).toString() === 'ftyp';
-    
-    if (!isValidWebM && !isValidMP4) {
-      logger.warn('视频数据可能损坏，但继续处理...', { requestId: req.requestId });
-    }
-    
-    // 保存临时文件，使用更安全的文件名
-    const ext = path.extname(filename) || '.webm';
-    const safeFilename = `temp_${Date.now()}_${Math.floor(Math.random()*10000)}_${req.requestId}${ext}`;
-    tempVideoPath = path.join(uploadDir, safeFilename);
-    
-    try {
-      fs.writeFileSync(tempVideoPath, videoBuffer);
-      resourceManager.registerTempFile(tempVideoPath);
-      
-      logger.info('临时视频文件已保存', { 
-        path: tempVideoPath, 
-        size: videoBuffer.length,
-        requestId: req.requestId
-      });
-    } catch (error) {
-      return res.status(500).json({
-        success: false,
-        error: '临时文件保存失败: ' + error.message,
-        code: 'FILE_SAVE_ERROR',
-        requestId: req.requestId
-      });
-    }
-    
-    await processVideoWithLogging(tempVideoPath, res, req.requestId);
-    
-  } catch (error) {
-    logger.error('Base64视频处理错误', { error: error.message, requestId: req.requestId });
-    
-    // 清理临时文件
-    if (tempVideoPath) {
-      resourceManager.cleanupImmediate(tempVideoPath);
-    }
-    
-    const errorResponse = ErrorHandler.handle(error, { requestId: req.requestId });
-    res.status(errorResponse.status).json({ 
-      success: false,
-      error: errorResponse.message,
-      code: errorResponse.code,
-      requestId: req.requestId
-    });
-  }
-});
-
-// 改进的通用视频处理函数
+// ========== 改进的通用视频处理函数 ==========
 async function processVideoWithLogging(videoPath, res, requestId) {
   const startTime = Date.now();
   const framesDir = path.join(uploadDir, `frames_${Date.now()}_${Math.floor(Math.random()*10000)}_${requestId}`);
@@ -1458,7 +1350,7 @@ async function processVideoWithLogging(videoPath, res, requestId) {
     const emotionResults = [];
     
     // 并发处理表情分析（限制并发数避免过载）
-    const concurrencyLimit = 3;
+    const concurrencyLimit = 2; // 降低并发数
     for (let i = 0; i < frameFiles.length; i += concurrencyLimit) {
       const batch = frameFiles.slice(i, i + concurrencyLimit);
       const batchPromises = batch.map(async (frame, batchIndex) => {
@@ -1490,16 +1382,26 @@ async function processVideoWithLogging(videoPath, res, requestId) {
       const batchResults = await Promise.all(batchPromises);
       emotionResults.push(...batchResults);
       
-      // 批次间短暂延迟
+      // 批次间延迟增加到500ms
       if (i + concurrencyLimit < frameFiles.length) {
-        await new Promise(resolve => setTimeout(resolve, 200));
+        await new Promise(resolve => setTimeout(resolve, 500));
       }
     }
     
     // 按索引排序结果
     emotionResults.sort((a, b) => a.index - b.index);
     
-    logger.info('表情分析完成', { requestId });
+    // 统计分析结果
+    const successfulFrames = emotionResults.filter(r => !r.emotion.error).length;
+    const failedFrames = emotionResults.filter(r => r.emotion.error).length;
+    
+    logger.info('表情分析完成', { 
+      requestId,
+      totalFrames: frameFiles.length,
+      successfulFrames,
+      failedFrames,
+      successRate: (successfulFrames / frameFiles.length * 100).toFixed(1) + '%'
+    });
 
     // 4. 语音识别
     let asrText = '';
@@ -1533,6 +1435,12 @@ async function processVideoWithLogging(videoPath, res, requestId) {
       asrText,
       asrError,
       processedFrames: frameFiles.length,
+      analysisStats: {
+        totalFrames: frameFiles.length,
+        successfulFrames,
+        failedFrames,
+        successRate: (successfulFrames / frameFiles.length * 100).toFixed(1) + '%'
+      },
       processingTimeMs: processingTime,
       timestamp: new Date().toISOString(),
       requestId,
@@ -1570,16 +1478,155 @@ async function processVideoWithLogging(videoPath, res, requestId) {
       requestId
     });
   } finally {
-    // 延迟清理临时文件，确保响应已发送
-    setTimeout(() => {
-      resourceManager.cleanupImmediate(videoPath);
-      resourceManager.cleanupImmediate(audioMp3Path);
-      resourceManager.cleanupImmediate(framesDir);
-    }, 5000); // 增加延迟时间确保响应完成
+    // 使用响应完成事件进行清理
+    res.on('finish', () => {
+      setTimeout(() => {
+        resourceManager.cleanupImmediate(videoPath);
+        resourceManager.cleanupImmediate(audioMp3Path);
+        resourceManager.cleanupImmediate(framesDir);
+      }, 1000);
+    });
   }
 }
 
-// 改进的错误处理中间件
+// ========== API路由 ==========
+
+// 健康检查接口
+app.get('/health', (req, res) => {
+  const health = performanceMonitor.getHealthStatus();
+  const resourceStats = resourceManager.getStats();
+  
+  res.status(health.status === 'healthy' ? 200 : 503).json({ 
+    status: health.status,
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    environment: {
+      nodeVersion: process.version,
+      platform: process.platform,
+      arch: process.arch,
+      memory: {
+        used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+        total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
+      }
+    },
+    performance: health.metrics,
+    resources: resourceStats
+  });
+});
+
+// 服务器信息接口
+app.get('/api/info', (req, res) => {
+  res.json({
+    name: 'Video Analysis Server',
+    version: '4.0.0', // 版本更新为4.0.0表示重大架构更改
+    timestamp: new Date().toISOString(),
+    capabilities: {
+      videoFormats: ['mp4', 'webm', 'ogg', 'avi', 'mov'],
+      maxFileSize: '100MB',
+      inputMethod: 'url-only', // 新增：说明只支持URL输入
+      features: [
+        'emotion-analysis', 
+        'speech-recognition', 
+        'frame-extraction', 
+        'video-validation',
+        'rate-limiting',
+        'performance-monitoring',
+        'resource-management',
+        'url-video-processing'
+      ]
+    },
+    endpoints: {
+      videoAnalysis: '/api/video/analyze', // 唯一的视频分析接口
+    },
+    limits: {
+      requestsPerWindow: '100/15min',
+      analysisRequests: '10/min',
+      maxVideoSize: '100MB',
+      maxProcessingTime: '120s',
+      downloadTimeout: '60s'
+    }
+  });
+});
+
+// 性能指标接口
+app.get('/api/metrics', (req, res) => {
+  // 简单的认证检查
+  const authToken = req.headers.authorization;
+  if (process.env.METRICS_TOKEN && authToken !== `Bearer ${process.env.METRICS_TOKEN}`) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  const metrics = performanceMonitor.getMetrics();
+  const resourceStats = resourceManager.getStats();
+  
+  res.json({
+    performance: metrics,
+    resources: resourceStats,
+    system: {
+      cpuUsage: process.cpuUsage(),
+      memoryUsage: process.memoryUsage(),
+      uptime: process.uptime(),
+      pid: process.pid
+    }
+  });
+});
+
+// 唯一的视频分析接口 - 只支持URL方式
+app.post('/api/video/analyze', analyzeLimit, async (req, res) => {
+  let tempVideoPath = null;
+  
+  try {
+    const { videoUrl, filename = 'video_from_url' } = req.body;
+    
+    if (!videoUrl) {
+      return res.status(400).json({ 
+        success: false,
+        error: '请提供视频URL',
+        code: 'MISSING_VIDEO_URL',
+        requestId: req.requestId      });
+    }
+    
+    // 验证URL格式
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(videoUrl);
+      if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+        throw new Error('仅支持HTTP和HTTPS协议');
+      }
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        error: '无效的视频URL格式',
+        code: 'INVALID_VIDEO_URL',
+        requestId: req.requestId
+      });
+    }
+    
+    // 下载视频文件
+    logger.info('开始从URL下载视频', { videoUrl, requestId: req.requestId });
+    tempVideoPath = await downloadVideoFromUrl(videoUrl, filename, req.requestId);
+    
+    await processVideoWithLogging(tempVideoPath, res, req.requestId);
+    
+  } catch (error) {
+    logger.error('URL视频处理错误', { error: error.message, requestId: req.requestId });
+    
+    // 清理临时文件
+    if (tempVideoPath) {
+      resourceManager.cleanupImmediate(tempVideoPath);
+    }
+    
+    const errorResponse = ErrorHandler.handle(error, { requestId: req.requestId });
+    res.status(errorResponse.status).json({ 
+      success: false,
+      error: errorResponse.message,
+      code: errorResponse.code,
+      requestId: req.requestId
+    });
+  }
+});
+
+// ========== 错误处理中间件 ==========
 app.use((error, req, res, next) => {
   const errorResponse = ErrorHandler.handle(error, { 
     url: req.url,
@@ -1587,27 +1634,9 @@ app.use((error, req, res, next) => {
     requestId: req.requestId
   });
   
-  // Multer错误处理
-  if (error instanceof multer.MulterError) {
-    if (error.code === 'LIMIT_FILE_SIZE') {
-      return res.status(413).json({
-        success: false,
-        error: '文件太大，最大支持100MB',
-        code: 'FILE_TOO_LARGE',
-        requestId: req.requestId
-      });
-    }
-    return res.status(400).json({
-      success: false,
-      error: '文件上传错误: ' + error.message,
-      code: 'UPLOAD_ERROR',
-      requestId: req.requestId
-    });
-  }
-  
   res.status(errorResponse.status).json({ 
     success: false,
-        error: errorResponse.message,
+    error: errorResponse.message,
     code: errorResponse.code,
     timestamp: new Date().toISOString(),
     requestId: req.requestId || 'unknown'
@@ -1622,7 +1651,13 @@ app.use((req, res) => {
     code: 'NOT_FOUND',
     path: req.path,
     method: req.method,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    availableEndpoints: [
+      'GET /health',
+      'GET /api/info', 
+      'GET /api/metrics',
+      'POST /api/video/analyze'
+    ]
   });
 });
 
@@ -1644,13 +1679,15 @@ process.on('unhandledRejection', (reason, promise) => {
 // 服务器启动
 const port = process.env.PORT || 3100;
 const server = app.listen(port, () => {
-  console.log(`=== Video Analysis Server Started ===`);
+  console.log(`=== Video Analysis Server Started (URL-only Mode) ===`);
   console.log(`Server URL: http://localhost:${port}`);
   console.log(`Health Check: http://localhost:${port}/health`);
   console.log(`Server Info: http://localhost:${port}/api/info`);
+  console.log(`Video Analysis: http://localhost:${port}/api/video/analyze`);
   console.log(`Upload Directory: ${uploadDir}`);
   console.log(`Process ID: ${process.pid}`);
   console.log(`Node Version: ${process.version}`);
+  console.log(`Input Method: URL-only`);
   console.log(`=== Ready to accept requests ===`);
 });
 
@@ -1680,12 +1717,12 @@ const gracefulShutdown = (signal) => {
   }, 15000);
 };
 
-process。on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process。on('SIGINT', () => gracefulShutdown('SIGINT'));
-process。on('SIGUSR2', () => gracefulShutdown('SIGUSR2')); // nodemon重启
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGUSR2', () => gracefulShutdown('SIGUSR2')); // nodemon重启
 
 // 处理服务器错误
-server。on('error', (error) => {
+server.on('error', (error) => {
   if (error.code === 'EADDRINUSE') {
     console.error(`端口 ${port} 已被占用`);
     process.exit(1);
@@ -1699,7 +1736,7 @@ setInterval(() => {
   const memoryUsage = process.memoryUsage();
   const memoryMB = (memoryUsage.heapUsed / 1024 / 1024).toFixed(2);
   
-  if (memoryMB > 500) { // 内存使用超过500MB时警告
+  if (memoryMB > 1000) { // 内存使用超过1GB时警告（调整为更适合视频处理的阈值）
     console.warn(`内存使用较高: ${memoryMB}MB`);
   }
   
@@ -1707,6 +1744,6 @@ setInterval(() => {
   if (process.env.NODE_ENV === 'development') {
     console.log(`内存使用: ${memoryMB}MB | 运行时间: ${Math.floor(process.uptime())}秒`);
   }
-}， 60000); // 每分钟检查一次
+}, 60000); // 每分钟检查一次
 
-module。exports = app;
+module.exports = app;
