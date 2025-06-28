@@ -1456,6 +1456,7 @@ function summarizeEmotions(emotionResults) {
   }
 }
 // ========== 改进的通用视频处理函数 ==========
+// ========== 改进的通用视频处理函数 ==========
 async function processVideoWithLogging(videoPath, res, requestId) {
   const startTime = Date.now();
   const framesDir = path.join(uploadDir, `frames_${Date.now()}_${Math.floor(Math.random()*10000)}_${requestId}`);
@@ -1598,11 +1599,40 @@ async function processVideoWithLogging(videoPath, res, requestId) {
 
     // 5. 返回结果
     const processingTime = Date.now() - startTime;
+    
+    // 【从此处开始新增代码 - 第773行】
+    // 6. AI综合分析（添加这一步）
+    let analysisResult = '';
+    let analysisError = null;
+
+    if (asrText && emotionResults.length > 0) {
+      logger.info('开始大模型综合分析...', { requestId });
+      try {
+        analysisResult = await analyzeWithLLM(asrText, emotionResults);
+        logger.info('大模型分析完成', { resultLength: analysisResult.length, requestId });
+      } catch (error) {
+        logger.warn('大模型分析失败', { error: error.message, requestId });
+        analysisError = {
+          message: error.message,
+          code: 'LLM_ANALYSIS_FAILED'
+        };
+      }
+    } else {
+      logger.info('跳过大模型分析（无文本或表情数据）', { requestId });
+      analysisError = {
+        message: '缺少分析所需的文本或表情数据',
+        code: 'MISSING_DATA'
+      };
+    }
+    // 【到此处结束新增代码 - 第793行】
+    
     const result = {
       success: true,
       emotionTimeline: emotionResults,
       asrText,
       asrError,
+      analysisResult,     // 添加大模型分析结果
+      analysisError,      // 添加可能的错误
       processedFrames: frameFiles.length,
       analysisStats: {
         totalFrames: frameFiles.length,
@@ -1657,7 +1687,6 @@ async function processVideoWithLogging(videoPath, res, requestId) {
     });
   }
 }
-
 // ========== API路由 ==========
 
 // 健康检查接口
