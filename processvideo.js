@@ -6,6 +6,7 @@ const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
 const axios = require("axios");
 const crypto = require("crypto");
+const { generateAuthUrl } = require('./generate_url');
 const WebSocket = require("ws");
 const rateLimit = require('express-rate-limit');
 const cluster = require('cluster');
@@ -1285,7 +1286,175 @@ async function analyzeImageEmotion(imgPath) {
     }
   }
 }
+// 调用讯飞星火大语言模型分析面试文本和表情
+async function analyzeWithLLM(asrText, emotionResults) {
+  return new Promise((resolve, reject) => {
+    try {
+      // 生成鉴权URL
+      const API_KEY = process.env.VOICE_APIKey || "e22b24049f00d5729427119b825f4a71";
+      const API_SECRET = process.env.VOICE_APISecret || "MWMwMDI0MGJkYzY2ZjkyODg5ODg2ZTg4";
+      const authUrl = generateAuthUrl(API_KEY, API_SECRET);
+      
+      // 构建情绪概要
+      const emotionSummary = summarizeEmotions(emotionResults);
+      
+      // 构建提示词
+      const systemPrompt = {
+        role: "system",
+        content: "你是一位专业的面试评估专家，请基于候选人的语音文本和表情分析，评估其面试表现。"
+      };
+      
+      const userPrompt = {
+        role: "user",
+        content: `请分析以下模拟面试数据并给出评价：
+        
+1. 语音文本内容：
+${asrText}
 
+2. 表情分析概要：
+${emotionSummary}
+
+请从以下几个方面评估：
+- 语言表达流畅度和清晰度
+- 回答问题的逻辑性和内容质量
+- 表情和情绪的适当性
+- 总体面试表现
+- 改进建议
+
+请给出详细、专业的评价。`
+      };
+      
+      // 连接WebSocket
+      const ws = new WebSocket(authUrl);
+      let responseText = '';
+      
+      ws.on('open', () => {
+        logger.info('成功连接到讯飞星火AI');
+        
+        // 发送请求
+        ws.send(JSON.stringify({
+          header: {
+            app_id: process.env.VOICE_APPID || "e8f592b9",
+            uid: `interview_${Date.now()}`
+          },
+          parameter: {
+            chat: {
+              domain: "general",
+              temperature: 0.5,
+              max_tokens: 4096
+            }
+          },
+          payload: {
+            message: {
+              text: [systemPrompt, userPrompt]
+            }
+          }
+        }));
+      });
+      
+      ws.on('message', (data) => {
+        try {
+          const resp = JSON.parse(data.toString());
+          if (resp.header?.code !== 0) {
+            logger.error('AI分析错误', { message: resp.header?.message });
+            reject(new Error(`AI分析错误: ${resp.header?.message}`));
+            ws.close();
+            return;
+          }
+          
+          const content = resp.payload?.choices?.text?.[0]?.content || '';
+          responseText += content;
+          
+          const isLast = resp.header?.status === 2;
+          if (isLast) {
+            logger.info('AI分析完成', { responseLength: responseText.length });
+            resolve(responseText);
+            ws.close();
+          }
+        } catch (e) {
+          logger.error('解析AI响应失败', { error: e.message });
+          reject(new Error(`解析AI响应失败: ${e.message}`));
+          ws.close();
+        }
+      });
+      
+      ws.on('error', (err) => {
+        logger.error('AI WebSocket错误', { error: err.message });
+        reject(new Error(`AI连接错误: ${err.message}`));
+      });
+      
+      // 超时处理
+      setTimeout(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.close();
+          reject(new Error('AI分析请求超时'));
+        }
+      }, 60000); // 60秒超时
+      
+    } catch (error) {
+      reject(new Error(`AI分析初始化失败: ${error.message}`));
+    }
+  });
+}
+
+// 从表情分析结果中提取摘要
+function summarizeEmotions(emotionResults) {
+  try {
+    // 过滤有效的表情结果
+    const validResults = emotionResults.filter(r => 
+      r.emotion && !r.emotion.error && r.emotion.data && r.emotion.data.expression);
+    
+    if (validResults.length === 0) {
+      return "无有效表情分析结果";
+    }
+    
+    // 计算情绪分布
+    const emotionCounts = {};
+    validResults.forEach(r => {
+      const expression = r.emotion.data.expression;
+      if (expression.type) {
+        emotionCounts[expression.type] = (emotionCounts[expression.type] || 0) + 1;
+      }
+    });
+    
+    // 排序情绪分布
+    const sortedEmotions = Object.entries(emotionCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([emotion, count]) => {
+        const percentage = ((count / validResults.length) * 100).toFixed(1);
+        return `${emotion}: ${percentage}%`;
+      });
+    
+    // 检测表情变化趋势
+    let trend = "稳定";
+    if (validResults.length > 3) {
+      const firstThird = validResults.slice(0, Math.floor(validResults.length / 3));
+      const lastThird = validResults.slice(-Math.floor(validResults.length / 3));
+      
+      const firstPositive = firstThird.filter(r => 
+        ["happy", "surprise"].includes(r.emotion.data.expression.type)).length;
+      const lastPositive = lastThird.filter(r => 
+        ["happy", "surprise"].includes(r.emotion.data.expression.type)).length;
+      
+      const firstNegative = firstThird.filter(r => 
+        ["angry", "fear", "sad", "disgust"].includes(r.emotion.data.expression.type)).length;
+      const lastNegative = lastThird.filter(r => 
+        ["angry", "fear", "sad", "disgust"].includes(r.emotion.data.expression.type)).length;
+      
+      if (lastPositive > firstPositive * 1.5) {
+        trend = "变得更积极";
+      } else if (lastNegative > firstNegative * 1.5) {
+        trend = "变得更消极";
+      }
+    }
+    
+    return `表情分布: ${sortedEmotions.join(", ")}\n表情变化趋势: ${trend}`;
+    
+  } catch (error) {
+    logger.warn('表情摘要生成失败', { error: error.message });
+    return "表情摘要生成失败";
+  }
+}
 // ========== 改进的通用视频处理函数 ==========
 async function processVideoWithLogging(videoPath, res, requestId) {
   const startTime = Date.now();
