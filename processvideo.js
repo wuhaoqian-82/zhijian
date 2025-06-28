@@ -1747,3 +1747,9 @@ setInterval(() => {
 }, 60000); // 每分钟检查一次
 
 module.exports = app;
+// 添加到processvideo.js文件末尾
+module.exports = app;
+module.exports.Logger = Logger;
+module.exports.ResourceManager = ResourceManager; 
+module.exports.ErrorHandler = ErrorHandler;
+module.exports.PerformanceMonitor = PerformanceMonitor;
