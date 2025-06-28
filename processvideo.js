@@ -1874,20 +1874,6 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('未处理的Promise拒绝:', reason?.message || reason);
 });
 
-// 服务器启动
-const port = process.env.PORT || 3100;
-const server = app.listen(port, () => {
-  console.log(`=== Video Analysis Server Started (URL-only Mode) ===`);
-  console.log(`Server URL: http://localhost:${port}`);
-  console.log(`Health Check: http://localhost:${port}/health`);
-  console.log(`Server Info: http://localhost:${port}/api/info`);
-  console.log(`Video Analysis: http://localhost:${port}/api/video/analyze`);
-  console.log(`Upload Directory: ${uploadDir}`);
-  console.log(`Process ID: ${process.pid}`);
-  console.log(`Node Version: ${process.version}`);
-  console.log(`Input Method: URL-only`);
-  console.log(`=== Ready to accept requests ===`);
-});
 
 // 服务器优雅关闭
 const gracefulShutdown = (signal) => {
@@ -1919,32 +1905,12 @@ process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('SIGUSR2', () => gracefulShutdown('SIGUSR2')); // nodemon重启
 
-// 处理服务器错误
-server.on('error', (error) => {
-  if (error.code === 'EADDRINUSE') {
-    console.error(`端口 ${port} 已被占用`);
-    process.exit(1);
-  } else {
-    console.error('服务器错误:', error.message);
-  }
-});
-
-// 定期性能监控
-setInterval(() => {
-  const memoryUsage = process.memoryUsage();
-  const memoryMB = (memoryUsage.heapUsed / 1024 / 1024).toFixed(2);
-  
-  if (memoryMB > 1000) { // 内存使用超过1GB时警告（调整为更适合视频处理的阈值）
-    console.warn(`内存使用较高: ${memoryMB}MB`);
-  }
-  
-  // 只在开发模式下详细输出
-  if (process.env.NODE_ENV === 'development') {
-    console.log(`内存使用: ${memoryMB}MB | 运行时间: ${Math.floor(process.uptime())}秒`);
-  }
-}, 60000); // 每分钟检查一次
 
 module.exports = app;
+module.exports.startServer = (testPort) => {
+  const serverPort = testPort || port;
+  return app.listen(serverPort);
+};
 // 添加到processvideo.js文件末尾
 module.exports = app;
 module.exports.Logger = Logger;
